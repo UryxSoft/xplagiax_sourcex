@@ -27,7 +27,11 @@ COPY decorators.py .
 COPY searchers.py .
 COPY search_service.py .
 COPY resources.py .
+COPY faiss_service.py .
 COPY app.py .
+
+# Crear directorio para datos FAISS
+RUN mkdir -p data
 
 # Exponer puerto
 EXPOSE 5000

@@ -14,6 +14,7 @@ from models import CircuitBreaker, PerformanceMetrics
 from rate_limiter import RateLimiter
 from resources import init_resources, cleanup_resources, get_redis_client, get_http_client
 from search_service import process_similarity_batch
+from faiss_service import get_faiss_index, init_faiss_index
 
 
 # Inicialización global
@@ -47,7 +48,8 @@ def similarity_search():
     Body JSON:
     {
         "data": [theme, idiom, [[page, paragraph, text], ...]],
-        "sources": ["crossref", "pubmed", ...] (opcional)
+        "sources": ["crossref", "pubmed", ...] (opcional),
+        "use_faiss": true (opcional, default: true)
     }
     """
     try:
@@ -67,6 +69,7 @@ def similarity_search():
         idiom = input_data[1]
         texts = input_data[2]
         sources = data.get('sources', None)
+        use_faiss = data.get('use_faiss', True)
         
         # Validación
         if not isinstance(texts, list):
@@ -87,7 +90,8 @@ def similarity_search():
             get_redis_client(),
             get_http_client(),
             rate_limiter,
-            sources
+            sources,
+            use_faiss
         )
         
         # Convertir a JSON
@@ -96,7 +100,8 @@ def similarity_search():
         return jsonify({
             "results": response,
             "count": len(response),
-            "processed_texts": len(texts)
+            "processed_texts": len(texts),
+            "faiss_enabled": use_faiss and get_faiss_index() is not None
         }), 200
     
     except Exception as e:
@@ -117,11 +122,16 @@ def health_check():
     stats = metrics.get_stats()
     stats['uptime_seconds'] = time.time() - app_start_time
     
+    # Stats de FAISS
+    faiss_index = get_faiss_index()
+    faiss_stats = faiss_index.get_stats() if faiss_index else None
+    
     return jsonify({
         "status": "healthy",
         "model": Config.EMBEDDING_MODEL,
         "redis": get_redis_client() is not None,
         "http_pool": get_http_client() is not None,
+        "faiss": faiss_stats,
         "metrics": stats,
         "circuit_breakers": circuit_status,
         "config": {
@@ -232,11 +242,82 @@ def benchmark():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/faiss/stats', methods=['GET'])
+def faiss_stats():
+    """Estadísticas del índice FAISS"""
+    faiss_index = get_faiss_index()
+    
+    if not faiss_index:
+        return jsonify({"error": "FAISS no disponible"}), 503
+    
+    return jsonify(faiss_index.get_stats()), 200
+
+
+@app.route('/api/faiss/clear', methods=['POST'])
+def faiss_clear():
+    """Limpia el índice FAISS"""
+    faiss_index = get_faiss_index()
+    
+    if not faiss_index:
+        return jsonify({"error": "FAISS no disponible"}), 503
+    
+    faiss_index.clear()
+    return jsonify({"message": "Índice FAISS limpiado"}), 200
+
+
+@app.route('/api/faiss/save', methods=['POST'])
+def faiss_save():
+    """Guarda el índice FAISS en disco"""
+    faiss_index = get_faiss_index()
+    
+    if not faiss_index:
+        return jsonify({"error": "FAISS no disponible"}), 503
+    
+    try:
+        faiss_index.save()
+        return jsonify({
+            "message": "Índice guardado exitosamente",
+            "stats": faiss_index.get_stats()
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/faiss/search', methods=['POST'])
+def faiss_search():
+    """Búsqueda directa en FAISS"""
+    faiss_index = get_faiss_index()
+    
+    if not faiss_index:
+        return jsonify({"error": "FAISS no disponible"}), 503
+    
+    try:
+        data = request.get_json()
+        query = data.get('query')
+        k = data.get('k', 10)
+        threshold = data.get('threshold', 0.7)
+        
+        if not query:
+            return jsonify({"error": "Query requerido"}), 400
+        
+        results = faiss_index.search(query, k=k, threshold=threshold)
+        
+        return jsonify({
+            "query": query,
+            "results": results,
+            "count": len(results)
+        }), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # Inicialización al primer request
 @app.before_first_request
 def startup():
     """Inicializa recursos al primer request"""
     asyncio.run(init_resources())
+    init_faiss_index()
     print("🚀 Sistema optimizado iniciado")
 
 
@@ -268,10 +349,15 @@ if __name__ == '__main__':
     print("   POST /api/reset-limits       - Reiniciar límites")
     print("   POST /api/cache/clear        - Limpiar caché")
     print("   POST /api/benchmark          - Test de performance")
+    print("   GET  /api/faiss/stats        - Estadísticas FAISS")
+    print("   POST /api/faiss/clear        - Limpiar índice FAISS")
+    print("   POST /api/faiss/save         - Guardar índice FAISS")
+    print("   POST /api/faiss/search       - Búsqueda directa FAISS")
     print("=" * 60)
     
     # Inicializar recursos
     asyncio.run(init_resources())
+    init_faiss_index()
     
     app.run(
         host='0.0.0.0', 
