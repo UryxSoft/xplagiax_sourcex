@@ -96,7 +96,456 @@ curl -X POST http://localhost:5000/api/faiss/search \
     "threshold": 0.75
   }'
 
+# 🔬 xplagiax_sourcex - Academic Search Service
 
+Sistema de búsqueda académica con similitud semántica utilizando FAISS, múltiples APIs y machine learning.
+
+## 🚀 Inicio Rápido
+
+### 1. Configuración
+
+```bash
+# Clonar repositorio
+git clone <repo-url>
+cd xplagiax_sourcex
+
+# Copiar configuración
+cp .env.example .env
+
+# Generar secretos (Linux/Mac)
+echo "REDIS_PASSWORD=$(openssl rand -base64 32)" >> .env
+echo "FLASK_SECRET_KEY=$(openssl rand -base64 48)" >> .env
+
+# Editar .env con tu configuración
+nano .env
+```
+
+### 2. Construir y Ejecutar
+
+```bash
+# Construir e iniciar servicios
+docker-compose up --build
+
+# En segundo plano
+docker-compose up -d
+
+# Ver logs
+docker-compose logs -f app
+```
+
+### 3. Verificar Estado
+
+```bash
+# Health check
+curl http://localhost:5000/api/health
+
+# Estadísticas FAISS
+curl http://localhost:5000/api/faiss/stats
+```
+
+## 📊 Arquitectura
+
+```
+┌─────────────┐
+│   Cliente   │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────────────────┐
+│   Flask + Gunicorn      │
+│   (4 workers)           │
+└──────┬──────────────────┘
+       │
+       ├──► Redis (Caché)
+       ├──► FAISS (Búsqueda vectorial)
+       └──► APIs Externas:
+            • Crossref
+            • PubMed
+            • Semantic Scholar
+            • arXiv
+            • OpenAlex
+            • Europe PMC
+            • DOAJ
+            • Zenodo
+```
+
+## 🔌 Endpoints Principales
+
+### Búsqueda de Similitud
+
+```bash
+POST /api/similarity-search
+Content-Type: application/json
+
+{
+  "data": [
+    "machine learning",
+    "en",
+    [
+      ["page1", "para1", "Neural networks are computational models"],
+      ["page1", "para2", "Deep learning uses multiple layers"]
+    ]
+  ],
+  "use_faiss": true,
+  "sources": ["semantic_scholar", "arxiv"]
+}
+```
+
+**Respuesta:**
+
+```json
+{
+  "results": [
+    {
+      "fuente": "semantic_scholar",
+      "texto_original": "Neural networks are...",
+      "texto_encontrado": "This paper presents...",
+      "porcentaje_match": 89.2,
+      "documento_coincidente": "Deep Learning Book",
+      "autor": "Goodfellow",
+      "type_document": "article"
+    }
+  ],
+  "count": 10,
+  "processed_texts": 2,
+  "faiss_enabled": true
+}
+```
+
+### FAISS
+
+```bash
+# Estadísticas
+GET /api/faiss/stats
+
+# Búsqueda directa
+POST /api/faiss/search
+{
+  "query": "deep learning neural networks",
+  "k": 20,
+  "threshold": 0.75
+}
+
+# Guardar índice
+POST /api/faiss/save
+
+# Backup
+POST /api/faiss/backup
+
+# Limpiar
+POST /api/faiss/clear
+```
+
+### Monitoreo
+
+```bash
+# Health check
+GET /api/health
+
+# Métricas Prometheus
+GET /api/metrics
+
+# Diagnóstico completo
+GET /api/diagnostics/full
+
+# Validar APIs externas
+POST /api/validate-apis
+
+# Profiler
+GET /api/profiler/stats
+GET /api/profiler/bottlenecks?top=10
+```
+
+### Administración
+
+```bash
+# Limpiar caché
+POST /api/cache/clear
+
+# Reiniciar rate limits
+POST /api/reset-limits
+
+# Benchmark
+POST /api/benchmark
+{
+  "num_texts": 50
+}
+```
+
+## 🔐 Seguridad
+
+### Rate Limiting
+
+- **Global**: 200 req/día, 50 req/hora por IP
+- **Búsqueda**: 10 req/minuto por IP
+
+### Validación de Entrada
+
+- Sanitización automática de HTML/XSS
+- Límites de longitud
+- Validación de tipos
+
+### Autenticación Redis
+
+Configurar contraseña en `.env`:
+
+```bash
+REDIS_PASSWORD=your_strong_password
+```
+
+### CORS
+
+Configurar dominios permitidos:
+
+```bash
+ALLOWED_ORIGINS=https://domain1.com,https://domain2.com
+```
+
+## 📈 Optimización
+
+### Estrategias FAISS
+
+| Tamaño | Estrategia | Velocidad | Memoria | Recall |
+|--------|------------|-----------|---------|--------|
+| <10k | Flat | ⚡⚡⚡ | 🔴🔴🔴 | 100% |
+| 10k-100k | HNSW | ⚡⚡ | 🔴🔴 | 95% |
+| 100k-1M | IVF+Flat | ⚡ | 🔴 | 90% |
+| >1M | IVF+PQ | 🐌 | ✅ | 85% |
+
+FAISS auto-upgrade automáticamente según el tamaño.
+
+### Caché
+
+- **Redis**: 24 horas de TTL
+- **Serialización**: orjson (5x más rápido que pickle)
+- **Compresión**: LRU con 512MB límite
+
+### Performance
+
+- **HTTP/2**: Pool de 20 conexiones persistentes
+- **Batch processing**: 64 embeddings por batch
+- **Async/await**: Búsquedas paralelas en APIs
+
+## 🧪 Testing
+
+```bash
+# Instalar dependencias de testing
+pip install pytest pytest-asyncio pytest-cov
+
+# Ejecutar tests
+pytest
+
+# Con cobertura
+pytest --cov=. --cov-report=html
+
+# Ver reporte
+open htmlcov/index.html
+```
+
+## 📊 Métricas
+
+### Prometheus
+
+```bash
+# Scrape endpoint
+GET /api/metrics
+```
+
+Métricas disponibles:
+- `api_requests_total`: Total de requests
+- `api_latency_ms`: Latencia promedio
+- `api_error_rate`: % de errores
+- `cache_hit_rate`: % de cache hits
+- `faiss_indexed_papers`: Papers en FAISS
+
+### Grafana Dashboard
+
+```json
+{
+  "panels": [
+    {
+      "title": "Request Rate",
+      "targets": ["rate(api_requests_total[5m])"]
+    },
+    {
+      "title": "FAISS Index Size",
+      "targets": ["faiss_indexed_papers"]
+    }
+  ]
+}
+```
+
+## 🐛 Troubleshooting
+
+### Error: FAISS no disponible
+
+```bash
+# Instalar FAISS
+pip install faiss-cpu
+
+# O para GPU
+pip install faiss-gpu
+```
+
+### Error: Redis connection refused
+
+```bash
+# Verificar que Redis esté corriendo
+docker-compose ps
+
+# Ver logs
+docker-compose logs redis
+
+# Reiniciar servicios
+docker-compose restart
+```
+
+### Memoria insuficiente
+
+```bash
+# Limpiar índice FAISS
+curl -X POST http://localhost:5000/api/faiss/clear
+
+# O reducir límites en docker-compose.yml
+deploy:
+  resources:
+    limits:
+      memory: 1G  # Reducir de 2G a 1G
+```
+
+### Índice corrupto
+
+```bash
+# Auto-reparación
+curl -X POST http://localhost:5000/api/faiss/save
+
+# O limpiar y reconstruir
+curl -X POST http://localhost:5000/api/faiss/clear
+```
+
+## 🔄 Backup y Recuperación
+
+### Backup Manual
+
+```bash
+# Backup FAISS
+curl -X POST http://localhost:5000/api/faiss/backup
+
+# Copiar datos
+docker cp academic_search_app:/app/backups ./backups_local
+```
+
+### Backup Automático (Cron)
+
+```bash
+# Agregar a crontab
+0 2 * * * docker exec academic_search_app curl -X POST http://localhost:5000/api/faiss/backup
+```
+
+### Restauración
+
+```bash
+# Copiar backup
+docker cp ./backups_local/faiss_20231215_020000/ academic_search_app:/app/data/
+
+# Renombrar archivos
+docker exec academic_search_app mv data/faiss_20231215_020000/faiss_index.index data/faiss_index.index
+
+# Reiniciar
+docker-compose restart app
+```
+
+## 📝 Logs
+
+### Ver Logs
+
+```bash
+# Tiempo real
+docker-compose logs -f app
+
+# Últimas 100 líneas
+docker-compose logs --tail=100 app
+
+# Logs de archivo
+docker exec academic_search_app tail -f logs/app_$(date +%Y%m%d).log
+```
+
+### Niveles de Log
+
+Configurar en `.env`:
+
+```bash
+LOG_LEVEL=DEBUG  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+```
+
+## 🚀 Producción
+
+### Checklist
+
+- [ ] Cambiar `REDIS_PASSWORD` y `FLASK_SECRET_KEY`
+- [ ] Configurar `ALLOWED_ORIGINS` con dominios reales
+- [ ] Establecer `LOG_LEVEL=WARNING`
+- [ ] Configurar backup automático
+- [ ] Configurar monitoreo (Prometheus + Grafana)
+- [ ] Habilitar HTTPS en reverse proxy
+- [ ] Limitar recursos en docker-compose
+- [ ] Configurar alertas
+
+### Reverse Proxy (Nginx)
+
+```nginx
+server {
+    listen 80;
+    server_name api.yourdomain.com;
+
+    location / {
+        proxy_pass http://localhost:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+### Escalado
+
+```bash
+# Aumentar workers de Gunicorn
+# En Dockerfile, cambiar:
+CMD ["gunicorn", "--workers", "8", ...]  # De 4 a 8
+
+# Escalar con Docker Compose
+docker-compose up -d --scale app=3
+```
+
+## 📚 Documentación Adicional
+
+- [FAISS Usage Guide](FAISS_USAGE.md)
+- [API Reference](docs/API.md)
+- [Architecture](docs/ARCHITECTURE.md)
+
+## 🤝 Contribución
+
+1. Fork el proyecto
+2. Crear branch (`git checkout -b feature/AmazingFeature`)
+3. Commit cambios (`git commit -m 'Add AmazingFeature'`)
+4. Push al branch (`git push origin feature/AmazingFeature`)
+5. Abrir Pull Request
+
+## 📄 Licencia
+
+Este proyecto está bajo la licencia MIT.
+
+## 👥 Autores
+
+- **Equipo xplagiax** - Desarrollo inicial
+
+## 🙏 Agradecimientos
+
+- Sentence Transformers
+- FAISS (Facebook AI)
+- Flask
+- Todas las APIs académicas utilizadas
 
   ┌─────────────────────────────────────────────────────────────────┐
 │ USUARIO ENVÍA REQUEST                                           │

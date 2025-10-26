@@ -1,8 +1,9 @@
 """
-Servicio principal de búsqueda
+Servicio principal de búsqueda - VERSIÓN CORREGIDA
 """
 import asyncio
 import time
+import logging
 from typing import List, Dict, Tuple, Optional
 from dataclasses import asdict
 
@@ -17,6 +18,8 @@ from searchers import (
 )
 from faiss_service import get_faiss_index
 
+logger = logging.getLogger(__name__)
+
 
 async def search_all_sources(
     query: str, 
@@ -29,12 +32,6 @@ async def search_all_sources(
     """
     Busca en todas las fuentes en paralelo
     """
-    from searchers import (
-        search_crossref, search_pubmed, search_semantic_scholar,
-        search_arxiv, search_openalex, search_europepmc,
-        search_doaj, search_zenodo
-    )
-    
     available_searches = {
         "crossref": lambda q, t, c, rl: search_crossref(q, t, c, rl),
         "pubmed": lambda q, t, c, rl: search_pubmed(q, t, c, rl),
@@ -46,22 +43,36 @@ async def search_all_sources(
         "zenodo": lambda q, t, c, rl: search_zenodo(q, t, c, rl),
     }
     
-    # Filtrar fuentes
+    # Filtrar fuentes si se especifican
     if sources:
         searches = {k: v for k, v in available_searches.items() if k in sources}
     else:
         searches = available_searches
     
+    logger.debug(f"Buscando en {len(searches)} fuentes", extra={"sources": list(searches.keys())})
+    
     # Ejecutar búsquedas en paralelo
-    tasks = [search_func(query, theme, http_client, rate_limiter) for search_func in searches.values()]
+    tasks = [
+        search_func(query, theme, http_client, rate_limiter) 
+        for search_func in searches.values()
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     
     all_results = []
     for source_name, result in zip(searches.keys(), results):
+        if isinstance(result, Exception):
+            logger.warning(f"Error en búsqueda de {source_name}", extra={"error": str(result)})
+            continue
+        
         if isinstance(result, list):
             for item in result:
                 item["source"] = source_name
                 all_results.append(item)
+    
+    logger.info(f"Búsqueda en APIs completada", extra={
+        "sources": len(searches),
+        "results": len(all_results)
+    })
     
     return all_results
 
@@ -77,18 +88,28 @@ def process_similarity_batch(
     use_faiss: bool = True
 ) -> List[SearchResult]:
     """
-    Procesa batch de textos con vectorización completa
-    Ahora con soporte FAISS para búsqueda rápida
+    Procesa batch de textos con vectorización completa y FAISS
     """
     start_time = time.time()
     
     all_results = []
     faiss_index = get_faiss_index() if use_faiss else None
     
+    logger.info("Iniciando procesamiento batch", extra={
+        "texts": len(texts),
+        "theme": theme,
+        "idiom": idiom,
+        "use_faiss": use_faiss,
+        "faiss_papers": faiss_index.index.ntotal if faiss_index else 0
+    })
+    
     # Verificar salud del índice FAISS
     if faiss_index and faiss_index.is_corrupted():
-        print("⚠️ Índice FAISS corrupto detectado, reparando...")
-        faiss_index.auto_repair()
+        logger.warning("Índice FAISS corrupto detectado, intentando reparar")
+        try:
+            faiss_index.auto_repair()
+        except Exception as e:
+            logger.error("Error reparando FAISS", extra={"error": str(e)})
     
     # Agrupar textos únicos para evitar búsquedas duplicadas
     unique_texts = {}
@@ -98,7 +119,7 @@ def process_similarity_batch(
             unique_texts[processed] = []
         unique_texts[processed].append((page, paragraph, text))
     
-    print(f"📊 Procesando {len(texts)} textos ({len(unique_texts)} únicos)")
+    logger.debug(f"Textos únicos después de deduplicación: {len(unique_texts)}")
     
     # Preparar queries para búsqueda en batch
     all_queries = []
@@ -112,6 +133,7 @@ def process_similarity_batch(
         cached_results = asyncio.run(get_from_cache(redis_client, cache_key))
         
         if cached_results:
+            logger.debug("Resultado desde caché", extra={"key": cache_key[:20]})
             all_results.extend([SearchResult(**r) for r in cached_results])
             continue
         
@@ -119,22 +141,28 @@ def process_similarity_batch(
         query_mapping.append((processed_text, original_texts, cache_key))
     
     if not all_queries:
-        print("✅ Todos los resultados desde caché")
+        logger.info("Todos los resultados desde caché")
         return all_results
+    
+    logger.info(f"Queries a procesar: {len(all_queries)}")
     
     # 1. Buscar en FAISS en batch (ultra-rápido)
     faiss_results_per_query = []
     if faiss_index and faiss_index.index.ntotal > 0:
-        print(f"🔍 Buscando {len(all_queries)} queries en FAISS: {faiss_index.index.ntotal} papers indexados")
+        logger.info(f"Buscando en FAISS", extra={
+            "queries": len(all_queries),
+            "indexed_papers": faiss_index.index.ntotal
+        })
+        
         try:
             faiss_results_per_query = faiss_index.search_batch(
                 all_queries,
                 k=20,
                 threshold=Config.SIMILARITY_THRESHOLD
             )
-            print(f"✅ Búsqueda FAISS completada")
+            logger.info("Búsqueda FAISS completada exitosamente")
         except Exception as e:
-            print(f"⚠️ Error en búsqueda FAISS: {e}")
+            logger.error("Error en búsqueda FAISS", extra={"error": str(e)})
             faiss_results_per_query = [[] for _ in all_queries]
     else:
         faiss_results_per_query = [[] for _ in all_queries]
@@ -162,6 +190,7 @@ def process_similarity_batch(
         # Si FAISS no tiene suficientes resultados, marcar para buscar en APIs
         if len(text_results) < 5:
             needs_api_search.append((idx, cleaned_text, processed_text, original_texts, cache_key))
+            logger.debug(f"Query {idx} necesita búsqueda en APIs (solo {len(text_results)} resultados en FAISS)")
         else:
             # Suficientes resultados desde FAISS
             text_results.sort(key=lambda x: x.porcentaje_match, reverse=True)
@@ -170,7 +199,11 @@ def process_similarity_batch(
     
     # 3. Buscar en APIs solo para queries que necesitan más resultados
     if needs_api_search:
-        print(f"🌐 Complementando {len(needs_api_search)} queries con búsqueda en APIs...")
+        logger.info(f"Complementando {len(needs_api_search)} queries con APIs externas")
+        
+        # Acumular todos los papers para agregar a FAISS en un solo batch
+        papers_to_add = []
+        metadata_to_add = []
         
         for idx, cleaned_text, processed_text, original_texts, cache_key in needs_api_search:
             # Buscar en APIs
@@ -179,27 +212,17 @@ def process_similarity_batch(
             )
             
             if search_results:
-                # Agregar nuevos papers a FAISS para futuras búsquedas
-                if faiss_index:
-                    try:
-                        abstracts = [r.get("abstract", "") for r in search_results if r.get("abstract")]
-                        if abstracts:
-                            faiss_metadata = [
-                                {
-                                    'title': r.get('title', 'Unknown'),
-                                    'author': r.get('author', 'Unknown'),
-                                    'abstract': r.get('abstract', ''),
-                                    'source': r.get('source', 'unknown'),
-                                    'type': r.get('type', 'unknown')
-                                }
-                                for r in search_results if r.get("abstract")
-                            ]
-                            faiss_index.add_papers(abstracts, faiss_metadata)
-                            print(f"➕ Agregados {len(abstracts)} papers a FAISS")
-                    except MemoryError:
-                        print("⚠️ Memoria insuficiente, FAISS manejando automáticamente...")
-                    except Exception as e:
-                        print(f"⚠️ Error agregando a FAISS: {e}")
+                # Acumular papers para FAISS
+                for r in search_results:
+                    if r.get("abstract"):
+                        papers_to_add.append(r["abstract"])
+                        metadata_to_add.append({
+                            'title': r.get('title', 'Unknown'),
+                            'author': r.get('author', 'Unknown'),
+                            'abstract': r['abstract'],
+                            'source': r.get('source', 'unknown'),
+                            'type': r.get('type', 'unknown')
+                        })
                 
                 # Calcular similitudes
                 abstracts = [r.get("abstract", "") for r in search_results]
@@ -233,19 +256,33 @@ def process_similarity_batch(
                     if text_results:
                         asyncio.run(save_to_cache(redis_client, cache_key, [asdict(r) for r in text_results]))
                     all_results.extend(text_results[:10])
+        
+        # 4. Agregar todos los papers nuevos a FAISS en UN SOLO BATCH
+        if papers_to_add and faiss_index:
+            try:
+                logger.info(f"Agregando {len(papers_to_add)} papers a FAISS en batch")
+                faiss_index.add_papers(papers_to_add, metadata_to_add)
+            except MemoryError:
+                logger.warning("Memoria insuficiente, FAISS manejando automáticamente")
+            except Exception as e:
+                logger.error("Error agregando papers a FAISS", extra={"error": str(e)})
     
-    # 4. Guardar índice FAISS actualizado
+    # 5. Guardar índice FAISS actualizado
     if faiss_index and faiss_index.index.ntotal > 0:
         try:
             faiss_index.save()
         except Exception as e:
-            print(f"⚠️ Error guardando FAISS: {e}")
+            logger.warning("Error guardando FAISS", extra={"error": str(e)})
     
     # Métricas
     elapsed = time.time() - start_time
-    print(f"⚡ Procesamiento completado en {elapsed:.2f}s")
-    print(f"📈 Throughput: {len(texts)/elapsed:.1f} textos/s")
-    if faiss_index:
-        print(f"💾 FAISS: {faiss_index.index.ntotal} papers indexados")
+    throughput = len(texts) / elapsed if elapsed > 0 else 0
+    
+    logger.info("Procesamiento completado", extra={
+        "elapsed_seconds": round(elapsed, 2),
+        "throughput_texts_per_sec": round(throughput, 1),
+        "total_results": len(all_results),
+        "faiss_papers": faiss_index.index.ntotal if faiss_index else 0
+    })
     
     return all_results

@@ -1,9 +1,45 @@
+# Framework web
 Flask==3.0.0
+flask-cors==4.0.0
+flask-limiter==3.5.0
+
+# Procesamiento de embeddings y ML
 sentence-transformers==2.2.2
-httpx[http2]==0.25.2
 scikit-learn==1.3.2
+
+# HTTP y async
+httpx[http2]==0.25.2
+
+# NLP
 nltk==3.8.1
+
+# Matemáticas y arrays
 numpy==1.24.3
+
+# Caché y almacenamiento
 redis==5.0.1
+
+# Servidor WSGI
 gunicorn==21.2.0
+
+# FAISS para búsqueda vectorial
 faiss-cpu==1.7.4
+# Para GPU (opcional, comentar faiss-cpu si se usa):
+# faiss-gpu==1.7.4
+
+# Serialización rápida (reemplazo de pickle)
+orjson==3.9.10
+
+# Logging estructurado
+python-json-logger==2.0.7
+
+# Monitoreo y profiling
+psutil==5.9.6
+
+# Métricas Prometheus
+prometheus-flask-exporter==0.23.0
+
+# Testing (opcional, para desarrollo)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0

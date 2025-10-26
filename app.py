@@ -1,13 +1,17 @@
 """
-Aplicación Flask principal
+Aplicación Flask principal - VERSIÓN CORREGIDA
 """
 import asyncio
 import time
 import atexit
+import os
+import logging
 from collections import defaultdict
 from dataclasses import asdict
-
 from flask import Flask, request, jsonify, g
+from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from config import Config
 from models import CircuitBreaker, PerformanceMetrics
@@ -17,140 +21,227 @@ from search_service import process_similarity_batch
 from api_validator import get_api_validator
 from profiler import get_profiler, profile
 from faiss_service import get_faiss_index, init_faiss_index
+from logging_config import setup_logging
+from input_validator import validate_similarity_input
 
-# Inicialización global
-app = Flask(__name__)
+# Configuración de logging
+logger = setup_logging()
+
+# Variables globales
 rate_limiter = RateLimiter()
 circuit_breakers = defaultdict(CircuitBreaker)
 metrics = PerformanceMetrics()
 app_start_time = time.time()
 
 
-@app.before_request
-def before_request():
-    """Tracking de inicio de request"""
-    g.start_time = time.time()
-
-
-@app.after_request
-def after_request(response):
-    """Tracking de métricas por request"""
-    if hasattr(g, 'start_time'):
-        latency = time.time() - g.start_time
-        metrics.record_request(latency, response.status_code >= 400)
-    return response
-
-
-@app.route('/api/similarity-search', methods=['POST'])
-def similarity_search():
-    """
-    Endpoint principal de búsqueda de similitud
+def create_app():
+    """Application Factory Pattern"""
+    app = Flask(__name__)
     
-    Body JSON:
-    {
-        "data": [theme, idiom, [[page, paragraph, text], ...]],
-        "sources": ["crossref", "pubmed", ...] (opcional),
-        "use_faiss": true (opcional, default: true)
-    }
-    """
-    try:
-        data = request.get_json()
+    # Configuración CORS
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": os.getenv("ALLOWED_ORIGINS", "*").split(","),
+            "methods": ["GET", "POST"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "max_age": 3600
+        }
+    })
+    
+    # Rate Limiting
+    limiter = Limiter(
+        key_func=get_remote_address,
+        app=app,
+        default_limits=["200 per day", "50 per hour"],
+        storage_uri=f"redis://{os.getenv('REDIS_HOST', 'localhost')}:{os.getenv('REDIS_PORT', 6379)}"
+    )
+    
+    # Inicializar recursos en contexto de aplicación
+    with app.app_context():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(init_resources())
+            init_faiss_index()
+            logger.info("Sistema optimizado iniciado", extra={
+                "model": Config.EMBEDDING_MODEL,
+                "threshold": Config.SIMILARITY_THRESHOLD
+            })
+        finally:
+            # No cerrar el loop aquí, lo necesitamos para las requests
+            pass
+    
+    # ========== MIDDLEWARE ==========
+    
+    @app.before_request
+    def before_request():
+        """Tracking de inicio de request"""
+        g.start_time = time.time()
+        g.cache_hit = False
+    
+    @app.after_request
+    def after_request(response):
+        """Tracking de métricas por request"""
+        if hasattr(g, 'start_time'):
+            latency = time.time() - g.start_time
+            metrics.record_request(latency, response.status_code >= 400)
+            
+            if hasattr(g, 'cache_hit') and g.cache_hit:
+                metrics.record_cache(hit=True)
         
-        if not data or 'data' not in data:
-            return jsonify({"error": "Datos inválidos. Se requiere campo 'data'"}), 400
+        return response
+    
+    @app.errorhandler(429)
+    def ratelimit_handler(e):
+        """Handler para rate limit excedido"""
+        logger.warning("Rate limit excedido", extra={
+            "ip": request.remote_addr,
+            "endpoint": request.endpoint
+        })
+        return jsonify({
+            "error": "Rate limit excedido. Intente nuevamente más tarde.",
+            "retry_after": e.description
+        }), 429
+    
+    @app.errorhandler(500)
+    def internal_error_handler(e):
+        """Handler para errores internos"""
+        logger.error("Error interno del servidor", extra={
+            "error": str(e),
+            "endpoint": request.endpoint
+        })
+        return jsonify({
+            "error": "Error interno del servidor",
+            "message": "Por favor contacte al administrador"
+        }), 500
+    
+    # ========== ENDPOINTS PRINCIPALES ==========
+    
+    @app.route('/api/similarity-search', methods=['POST'])
+    @limiter.limit("10 per minute")
+    def similarity_search():
+        """
+        Endpoint principal de búsqueda de similitud
         
-        input_data = data['data']
-        
-        if not isinstance(input_data, list) or len(input_data) < 3:
+        Body JSON:
+        {
+            "data": [theme, idiom, [[page, paragraph, text], ...]],
+            "sources": ["crossref", "pubmed", ...] (opcional),
+            "use_faiss": true (opcional, default: true)
+        }
+        """
+        try:
+            data = request.get_json()
+            
+            if not data or 'data' not in data:
+                return jsonify({"error": "Datos inválidos. Se requiere campo 'data'"}), 400
+            
+            # Validación robusta de entrada
+            try:
+                theme, idiom, texts = validate_similarity_input(data['data'])
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            
+            sources = data.get('sources', None)
+            use_faiss = data.get('use_faiss', True)
+            
+            # Validar sources si se proporciona
+            if sources and not isinstance(sources, list):
+                return jsonify({"error": "sources debe ser una lista"}), 400
+            
+            logger.info("Iniciando búsqueda de similitud", extra={
+                "theme": theme,
+                "idiom": idiom,
+                "num_texts": len(texts),
+                "use_faiss": use_faiss
+            })
+            
+            # Procesar búsqueda
+            results = process_similarity_batch(
+                texts, 
+                theme, 
+                idiom,
+                get_redis_client(),
+                get_http_client(),
+                rate_limiter,
+                sources,
+                use_faiss
+            )
+            
+            # Convertir a JSON
+            response_data = [asdict(r) for r in results]
+            
+            logger.info("Búsqueda completada", extra={
+                "num_results": len(response_data),
+                "processed_texts": len(texts)
+            })
+            
             return jsonify({
-                "error": "Formato inválido. Se esperaba [theme, idiom, [...]]"
-            }), 400
+                "results": response_data,
+                "count": len(response_data),
+                "processed_texts": len(texts),
+                "faiss_enabled": use_faiss and get_faiss_index() is not None
+            }), 200
         
-        theme = input_data[0]
-        idiom = input_data[1]
-        texts = input_data[2]
-        sources = data.get('sources', None)
-        use_faiss = data.get('use_faiss', True)
-        
-        # Validación
-        if not isinstance(texts, list):
+        except Exception as e:
+            metrics.record_request(0, error=True)
+            logger.error("Error en similarity_search", extra={
+                "error": str(e),
+                "type": type(e).__name__
+            })
             return jsonify({
-                "error": "El tercer elemento debe ser una lista de tuplas"
-            }), 400
+                "error": f"Error en el procesamiento: {str(e)}"
+            }), 500
+    
+    @app.route('/api/health', methods=['GET'])
+    def health_check():
+        """Endpoint de verificación de salud con métricas"""
+        circuit_status = {
+            source: breaker.state.value 
+            for source, breaker in circuit_breakers.items()
+        }
         
-        if not theme or not idiom:
-            return jsonify({
-                "error": "Theme e idiom son requeridos"
-            }), 400
+        stats = metrics.get_stats()
+        stats['uptime_seconds'] = round(time.time() - app_start_time, 2)
         
-        # Procesar búsqueda
-        results = process_similarity_batch(
-            texts, 
-            theme, 
-            idiom,
-            get_redis_client(),
-            get_http_client(),
-            rate_limiter,
-            sources,
-            use_faiss
+        # Stats de FAISS
+        faiss_index = get_faiss_index()
+        faiss_stats = faiss_index.get_stats() if faiss_index else None
+        
+        redis_status = "connected" if get_redis_client() else "disconnected"
+        http_status = "active" if get_http_client() else "inactive"
+        
+        overall_healthy = (
+            redis_status == "connected" and 
+            http_status == "active" and
+            (not faiss_stats or not faiss_stats.get('corrupted', False))
         )
         
-        # Convertir a JSON
-        response = [asdict(r) for r in results]
+        return jsonify({
+            "status": "healthy" if overall_healthy else "degraded",
+            "model": Config.EMBEDDING_MODEL,
+            "redis": redis_status,
+            "http_pool": http_status,
+            "faiss": faiss_stats,
+            "metrics": stats,
+            "circuit_breakers": circuit_status,
+            "config": {
+                "similarity_threshold": Config.SIMILARITY_THRESHOLD,
+                "batch_size": Config.EMBEDDING_BATCH_SIZE,
+                "max_results_per_source": Config.MAX_RESULTS_PER_SOURCE
+            }
+        }), 200 if overall_healthy else 503
+    
+    @app.route('/api/metrics', methods=['GET'])
+    def get_metrics():
+        """Endpoint dedicado a métricas (Prometheus-compatible)"""
+        stats = metrics.get_stats()
+        uptime = time.time() - app_start_time
         
-        return jsonify({
-            "results": response,
-            "count": len(response),
-            "processed_texts": len(texts),
-            "faiss_enabled": use_faiss and get_faiss_index() is not None
-        }), 200
-    
-    except Exception as e:
-        metrics.record_request(0, error=True)
-        return jsonify({
-            "error": f"Error en el procesamiento: {str(e)}"
-        }), 500
-
-
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    """Endpoint de verificación de salud con métricas"""
-    circuit_status = {
-        source: breaker.state.value 
-        for source, breaker in circuit_breakers.items()
-    }
-    
-    stats = metrics.get_stats()
-    stats['uptime_seconds'] = time.time() - app_start_time
-    
-    # Stats de FAISS
-    faiss_index = get_faiss_index()
-    faiss_stats = faiss_index.get_stats() if faiss_index else None
-    
-    return jsonify({
-        "status": "healthy",
-        "model": Config.EMBEDDING_MODEL,
-        "redis": get_redis_client() is not None,
-        "http_pool": get_http_client() is not None,
-        "faiss": faiss_stats,
-        "metrics": stats,
-        "circuit_breakers": circuit_status,
-        "config": {
-            "similarity_threshold": Config.SIMILARITY_THRESHOLD,
-            "batch_size": Config.EMBEDDING_BATCH_SIZE,
-            "max_results_per_source": Config.MAX_RESULTS_PER_SOURCE
-        }
-    }), 200
-
-
-@app.route('/api/metrics', methods=['GET'])
-def get_metrics():
-    """Endpoint dedicado a métricas (Prometheus-compatible)"""
-    stats = metrics.get_stats()
-    uptime = time.time() - app_start_time
-    
-    prometheus_format = f"""
-# HELP api_requests_total Total number of API requests
+        faiss_index = get_faiss_index()
+        faiss_papers = faiss_index.index.ntotal if faiss_index else 0
+        
+        prometheus_format = f"""# HELP api_requests_total Total number of API requests
 # TYPE api_requests_total counter
 api_requests_total {stats['requests']}
 
@@ -169,535 +260,370 @@ cache_hit_rate {stats['cache_hit_rate']}
 # HELP uptime_seconds Application uptime in seconds
 # TYPE uptime_seconds counter
 uptime_seconds {uptime}
+
+# HELP faiss_indexed_papers Total papers in FAISS index
+# TYPE faiss_indexed_papers gauge
+faiss_indexed_papers {faiss_papers}
 """
-    
-    return prometheus_format, 200, {'Content-Type': 'text/plain; charset=utf-8'}
-
-
-@app.route('/api/reset-limits', methods=['POST'])
-def reset_limits():
-    """Reinicia los contadores de límites de API"""
-    asyncio.run(rate_limiter.reset())
-    
-    # Reiniciar circuit breakers
-    from models import CircuitState
-    for breaker in circuit_breakers.values():
-        breaker.failure_count = 0
-        breaker.state = CircuitState.CLOSED
-    
-    return jsonify({
-        "message": "Límites y circuit breakers reiniciados"
-    }), 200
-
-
-@app.route('/api/cache/clear', methods=['POST'])
-def clear_cache():
-    """Limpia el caché de Redis"""
-    redis_client = get_redis_client()
-    if not redis_client:
-        return jsonify({"error": "Redis no disponible"}), 503
-    
-    try:
-        asyncio.run(redis_client.flushdb())
-        return jsonify({"message": "Caché limpiado"}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/benchmark', methods=['POST'])
-def benchmark():
-    """
-    Endpoint para benchmarking
-    """
-    try:
-        data = request.get_json()
-        num_texts = data.get('num_texts', 10)
         
-        # Generar textos de prueba
-        test_texts = [
-            (f"page_{i}", f"para_{i}", f"machine learning artificial intelligence neural networks deep learning research paper methodology results conclusion {i}")
-            for i in range(num_texts)
-        ]
+        return prometheus_format, 200, {'Content-Type': 'text/plain; charset=utf-8'}
+    
+    @app.route('/api/reset-limits', methods=['POST'])
+    def reset_limits():
+        """Reinicia los contadores de límites de API"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(rate_limiter.reset())
+        finally:
+            loop.close()
         
-        start = time.time()
-        results = process_similarity_batch(
-            test_texts, 
-            "machine learning", 
-            "en",
-            get_redis_client(),
-            get_http_client(),
-            rate_limiter,
-            sources=["semantic_scholar"]
-        )
-        elapsed = time.time() - start
+        # Reiniciar circuit breakers
+        from models import CircuitState
+        for breaker in circuit_breakers.values():
+            breaker.failure_count = 0
+            breaker.state = CircuitState.CLOSED
+        
+        logger.info("Límites y circuit breakers reiniciados")
         
         return jsonify({
-            "num_texts": num_texts,
-            "num_results": len(results),
-            "elapsed_seconds": round(elapsed, 3),
-            "throughput_texts_per_sec": round(num_texts / elapsed, 2),
-            "avg_latency_ms": round(elapsed / num_texts * 1000, 2)
+            "message": "Límites y circuit breakers reiniciados"
         }), 200
     
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/faiss/stats', methods=['GET'])
-def faiss_stats():
-    """Estadísticas del índice FAISS"""
-    faiss_index = get_faiss_index()
-    
-    if not faiss_index:
-        return jsonify({"error": "FAISS no disponible"}), 503
-    
-    return jsonify(faiss_index.get_stats()), 200
-
-
-@app.route('/api/faiss/clear', methods=['POST'])
-def faiss_clear():
-    """Limpia el índice FAISS"""
-    faiss_index = get_faiss_index()
-    
-    if not faiss_index:
-        return jsonify({"error": "FAISS no disponible"}), 503
-    
-    faiss_index.clear()
-    return jsonify({"message": "Índice FAISS limpiado"}), 200
-
-
-@app.route('/api/faiss/save', methods=['POST'])
-def faiss_save():
-    """Guarda el índice FAISS en disco"""
-    faiss_index = get_faiss_index()
-    
-    if not faiss_index:
-        return jsonify({"error": "FAISS no disponible"}), 503
-    
-    try:
-        faiss_index.save()
-        return jsonify({
-            "message": "Índice guardado exitosamente",
-            "stats": faiss_index.get_stats()
-        }), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/faiss/search', methods=['POST'])
-def faiss_search():
-    """Búsqueda directa en FAISS"""
-    faiss_index = get_faiss_index()
-    
-    if not faiss_index:
-        return jsonify({"error": "FAISS no disponible"}), 503
-    
-    try:
-        data = request.get_json()
-        query = data.get('query')
-        k = data.get('k', 10)
-        threshold = data.get('threshold', 0.7)
+    @app.route('/api/cache/clear', methods=['POST'])
+    def clear_cache():
+        """Limpia el caché de Redis"""
+        redis_client = get_redis_client()
+        if not redis_client:
+            return jsonify({"error": "Redis no disponible"}), 503
         
-        if not query:
-            return jsonify({"error": "Query requerido"}), 400
-        
-        results = faiss_index.search(query, k=k, threshold=threshold)
-        
-        return jsonify({
-            "query": query,
-            "results": results,
-            "count": len(results)
-        }), 200
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(redis_client.flushdb())
+                logger.info("Caché limpiado exitosamente")
+                return jsonify({"message": "Caché limpiado"}), 200
+            finally:
+                loop.close()
+        except Exception as e:
+            logger.error("Error limpiando caché", extra={"error": str(e)})
+            return jsonify({"error": str(e)}), 500
     
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ========== ENDPOINTS DE VALIDACIÓN DE APIS ==========
-@app.route('/api/validate-apis', methods=['POST'])
-async def validate_external_apis():
-    """
-    Valida todas las APIs externas
-    
-    POST /api/validate-apis
-    {
-        "sources": ["crossref", "pubmed"]  // Opcional, default: todas
-    }
-    """
-    try:
-        data = request.get_json() or {}
-        sources = data.get('sources', None)
-        
-        validator = get_api_validator()
-        
-        if sources:
-            # Validar solo fuentes específicas
-            async with httpx.AsyncClient() as client:
-                tasks = [validator.validate_api(s, client) for s in sources]
-                results = await asyncio.gather(*tasks)
+    @app.route('/api/benchmark', methods=['POST'])
+    @profile
+    def benchmark():
+        """Endpoint para benchmarking"""
+        try:
+            data = request.get_json() or {}
+            num_texts = min(data.get('num_texts', 10), 100)  # Máximo 100
             
-            metrics = {r.source: r for r in results}
-        else:
-            # Validar todas
-            metrics = await validator.validate_all_apis()
+            # Generar textos de prueba
+            test_texts = [
+                (f"page_{i}", f"para_{i}", 
+                 f"machine learning artificial intelligence neural networks "
+                 f"deep learning research paper methodology results {i}")
+                for i in range(num_texts)
+            ]
+            
+            start = time.time()
+            results = process_similarity_batch(
+                test_texts, 
+                "machine learning", 
+                "en",
+                get_redis_client(),
+                get_http_client(),
+                rate_limiter,
+                sources=["semantic_scholar"],
+                use_faiss=True
+            )
+            elapsed = time.time() - start
+            
+            return jsonify({
+                "num_texts": num_texts,
+                "num_results": len(results),
+                "elapsed_seconds": round(elapsed, 3),
+                "throughput_texts_per_sec": round(num_texts / elapsed, 2) if elapsed > 0 else 0,
+                "avg_latency_ms": round(elapsed / num_texts * 1000, 2) if num_texts > 0 else 0
+            }), 200
         
+        except Exception as e:
+            logger.error("Error en benchmark", extra={"error": str(e)})
+            return jsonify({"error": str(e)}), 500
+    
+    # ========== ENDPOINTS FAISS ==========
+    
+    @app.route('/api/faiss/stats', methods=['GET'])
+    def faiss_stats():
+        """Estadísticas del índice FAISS"""
+        faiss_index = get_faiss_index()
+        
+        if not faiss_index:
+            return jsonify({"error": "FAISS no disponible"}), 503
+        
+        return jsonify(faiss_index.get_stats()), 200
+    
+    @app.route('/api/faiss/clear', methods=['POST'])
+    def faiss_clear():
+        """Limpia el índice FAISS"""
+        faiss_index = get_faiss_index()
+        
+        if not faiss_index:
+            return jsonify({"error": "FAISS no disponible"}), 503
+        
+        faiss_index.clear()
+        logger.warning("Índice FAISS limpiado")
+        return jsonify({"message": "Índice FAISS limpiado"}), 200
+    
+    @app.route('/api/faiss/save', methods=['POST'])
+    def faiss_save():
+        """Guarda el índice FAISS en disco"""
+        faiss_index = get_faiss_index()
+        
+        if not faiss_index:
+            return jsonify({"error": "FAISS no disponible"}), 503
+        
+        try:
+            faiss_index.save()
+            logger.info("Índice FAISS guardado")
+            return jsonify({
+                "message": "Índice guardado exitosamente",
+                "stats": faiss_index.get_stats()
+            }), 200
+        except Exception as e:
+            logger.error("Error guardando FAISS", extra={"error": str(e)})
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/api/faiss/search', methods=['POST'])
+    def faiss_search():
+        """Búsqueda directa en FAISS"""
+        faiss_index = get_faiss_index()
+        
+        if not faiss_index:
+            return jsonify({"error": "FAISS no disponible"}), 503
+        
+        try:
+            data = request.get_json()
+            query = data.get('query')
+            k = min(data.get('k', 10), 100)  # Máximo 100
+            threshold = max(0.0, min(data.get('threshold', 0.7), 1.0))  # Entre 0 y 1
+            
+            if not query:
+                return jsonify({"error": "Query requerido"}), 400
+            
+            results = faiss_index.search(query, k=k, threshold=threshold)
+            
+            return jsonify({
+                "query": query,
+                "results": results,
+                "count": len(results)
+            }), 200
+        
+        except Exception as e:
+            logger.error("Error en búsqueda FAISS", extra={"error": str(e)})
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/api/faiss/backup', methods=['POST'])
+    def faiss_backup():
+        """Backup del índice FAISS"""
+        import shutil
+        from datetime import datetime
+        
+        faiss_index = get_faiss_index()
+        if not faiss_index:
+            return jsonify({"error": "FAISS no disponible"}), 503
+        
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            backup_dir = f"backups/faiss_{timestamp}"
+            
+            os.makedirs(backup_dir, exist_ok=True)
+            
+            # Guardar primero
+            faiss_index.save()
+            
+            # Copiar archivos
+            shutil.copy("data/faiss_index.index", backup_dir)
+            shutil.copy("data/faiss_index_metadata.pkl", backup_dir)
+            
+            logger.info("Backup FAISS creado", extra={"backup_dir": backup_dir})
+            
+            return jsonify({
+                "message": f"Backup creado exitosamente",
+                "backup_path": backup_dir,
+                "papers": faiss_index.index.ntotal
+            }), 200
+        
+        except Exception as e:
+            logger.error("Error creando backup", extra={"error": str(e)})
+            return jsonify({"error": str(e)}), 500
+    
+    # ========== ENDPOINTS DE VALIDACIÓN DE APIS ==========
+    
+    @app.route('/api/validate-apis', methods=['POST'])
+    def validate_external_apis():
+        """Valida todas las APIs externas"""
+        try:
+            data = request.get_json() or {}
+            sources = data.get('sources', None)
+            
+            validator = get_api_validator()
+            http_client = get_http_client()
+            
+            if not http_client:
+                return jsonify({"error": "HTTP client no disponible"}), 503
+            
+            # Ejecutar validación en nuevo event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                if sources:
+                    async def validate_sources():
+                        tasks = [validator.validate_api(s, http_client) for s in sources]
+                        return await asyncio.gather(*tasks)
+                    
+                    results = loop.run_until_complete(validate_sources())
+                    for result in results:
+                        validator.metrics[result.source] = result
+                else:
+                    loop.run_until_complete(validator.validate_all_apis(http_client))
+                
+                report = validator.get_health_report()
+                return jsonify(report), 200
+            finally:
+                loop.close()
+        
+        except Exception as e:
+            logger.error("Error validando APIs", extra={"error": str(e)})
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/api/api-health', methods=['GET'])
+    def get_api_health():
+        """Retorna estado de salud de APIs (último check)"""
+        validator = get_api_validator()
         report = validator.get_health_report()
         
         return jsonify(report), 200
     
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/api/api-health', methods=['GET'])
-def get_api_health():
-    """
-    Retorna estado de salud de APIs (último check)
-    
-    GET /api/api-health
-    """
-    validator = get_api_validator()
-    report = validator.get_health_report()
-    
-    return jsonify(report), 200
-
-
-@app.route('/api/failing-apis', methods=['GET'])
-def get_failing_apis():
-    """
-    Lista APIs que están fallando
-    
-    GET /api/failing-apis
-    """
-    validator = get_api_validator()
-    failing = validator.get_failing_apis()
-    
-    return jsonify({
-        "failing_apis": failing,
-        "count": len(failing)
-    }), 200
-
-
-# ========== ENDPOINTS DE PROFILING ==========
-
-@app.route('/api/profiler/stats', methods=['GET'])
-def get_profiler_stats():
-    """
-    Estadísticas de performance del sistema
-    
-    GET /api/profiler/stats
-    """
-    profiler = get_profiler()
-    report = profiler.generate_report()
-    
-    return jsonify(report), 200
-
-
-@app.route('/api/profiler/bottlenecks', methods=['GET'])
-def get_bottlenecks():
-    """
-    Identifica cuellos de botella
-    
-    GET /api/profiler/bottlenecks?top=10
-    """
-    top_n = request.args.get('top', 5, type=int)
-    profiler = get_profiler()
-    bottlenecks = profiler.get_bottlenecks(top_n)
-    
-    return jsonify({
-        "bottlenecks": bottlenecks,
-        "count": len(bottlenecks)
-    }), 200
-
-
-@app.route('/api/profiler/clear', methods=['POST'])
-def clear_profiler_snapshots():
-    """
-    Limpia snapshots del profiler
-    
-    POST /api/profiler/clear
-    """
-    profiler = get_profiler()
-    profiler.clear_snapshots()
-    
-    return jsonify({"message": "Snapshots limpiados"}), 200
-
-
-# ========== ENDPOINTS DE DIAGNÓSTICO AVANZADO ==========
-
-@app.route('/api/diagnostics/full', methods=['GET'])
-async def full_diagnostics():
-    """
-    Diagnóstico completo del sistema
-    
-    GET /api/diagnostics/full
-    """
-    # 1. Validar APIs
-    validator = get_api_validator()
-    api_health = await validator.validate_all_apis()
-    api_report = validator.get_health_report()
-    
-    # 2. Profiler
-    profiler = get_profiler()
-    perf_report = profiler.generate_report()
-    
-    # 3. FAISS Stats
-    faiss_index = get_faiss_index()
-    faiss_stats = faiss_index.get_stats() if faiss_index else None
-    
-    # 4. Redis/HTTP
-    redis_ok = get_redis_client() is not None
-    http_ok = get_http_client() is not None
-    
-    # 5. Circuit Breakers
-    circuit_status = {
-        source: breaker.state.value 
-        for source, breaker in circuit_breakers.items()
-    }
-    
-    return jsonify({
-        "timestamp": time.time(),
-        "overall_health": "healthy" if api_report['summary']['overall_health'] == "healthy" and perf_report['system']['cpu']['percent'] < 80 else "degraded",
-        "components": {
-            "faiss": faiss_stats,
-            "redis": {"status": "connected" if redis_ok else "disconnected"},
-            "http_pool": {"status": "active" if http_ok else "inactive"},
-            "apis": api_report,
-            "performance": perf_report,
-            "circuit_breakers": circuit_status
-        },
-        "recommendations": perf_report['recommendations'] + [
-            f"⚠️ {len(validator.get_failing_apis())} APIs con problemas" 
-            if validator.get_failing_apis() else "✅ Todas las APIs operativas"
-        ]
-    }), 200
-
-
-# ========== BENCHMARK AVANZADO ==========
-
-@app.route('/api/benchmark/advanced', methods=['POST'])
-@profile  # Decorador de profiling
-def advanced_benchmark():
-    """
-    Benchmark avanzado con profiling
-    
-    POST /api/benchmark/advanced
-    {
-        "num_texts": 50,
-        "use_faiss": true,
-        "parallel": true
-    }
-    """
-    try:
-        data = request.get_json() or {}
-        num_texts = data.get('num_texts', 20)
-        use_faiss = data.get('use_faiss', True)
-        parallel = data.get('parallel', True)
+    @app.route('/api/failing-apis', methods=['GET'])
+    def get_failing_apis():
+        """Lista APIs que están fallando"""
+        validator = get_api_validator()
+        failing = validator.get_failing_apis()
         
-        # Generar textos de prueba
-        test_texts = [
-            (f"page_{i}", f"para_{i}", 
-             f"machine learning artificial intelligence neural networks deep learning "
-             f"convolutional networks image recognition natural language processing {i}")
-            for i in range(num_texts)
-        ]
-        
-        # Medir con profiler
+        return jsonify({
+            "failing_apis": failing,
+            "count": len(failing)
+        }), 200
+    
+    # ========== ENDPOINTS DE PROFILING ==========
+    
+    @app.route('/api/profiler/stats', methods=['GET'])
+    def get_profiler_stats():
+        """Estadísticas de performance del sistema"""
         profiler = get_profiler()
+        report = profiler.generate_report()
         
-        start = time.time()
-        results = process_similarity_batch(
-            test_texts,
-            "machine learning",
-            "en",
-            get_redis_client(),
-            get_http_client(),
-            rate_limiter,
-            use_faiss=use_faiss
+        return jsonify(report), 200
+    
+    @app.route('/api/profiler/bottlenecks', methods=['GET'])
+    def get_bottlenecks():
+        """Identifica cuellos de botella"""
+        top_n = min(request.args.get('top', 5, type=int), 20)
+        profiler = get_profiler()
+        bottlenecks = profiler.get_bottlenecks(top_n)
+        
+        return jsonify({
+            "bottlenecks": bottlenecks,
+            "count": len(bottlenecks)
+        }), 200
+    
+    @app.route('/api/profiler/clear', methods=['POST'])
+    def clear_profiler_snapshots():
+        """Limpia snapshots del profiler"""
+        profiler = get_profiler()
+        profiler.clear_snapshots()
+        
+        logger.info("Snapshots del profiler limpiados")
+        return jsonify({"message": "Snapshots limpiados"}), 200
+    
+    # ========== DIAGNÓSTICO ==========
+    
+    @app.route('/api/diagnostics/full', methods=['GET'])
+    def full_diagnostics():
+        """Diagnóstico completo del sistema"""
+        # Validar APIs
+        validator = get_api_validator()
+        http_client = get_http_client()
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            if http_client:
+                loop.run_until_complete(validator.validate_all_apis(http_client))
+            api_report = validator.get_health_report()
+        finally:
+            loop.close()
+        
+        # Profiler
+        profiler = get_profiler()
+        perf_report = profiler.generate_report()
+        
+        # FAISS Stats
+        faiss_index = get_faiss_index()
+        faiss_stats = faiss_index.get_stats() if faiss_index else None
+        
+        # Redis/HTTP
+        redis_ok = get_redis_client() is not None
+        http_ok = get_http_client() is not None
+        
+        # Circuit Breakers
+        circuit_status = {
+            source: breaker.state.value 
+            for source, breaker in circuit_breakers.items()
+        }
+        
+        overall_healthy = (
+            api_report['summary']['overall_health'] == "healthy" and
+            perf_report['system']['cpu']['percent'] < 80 and
+            redis_ok and http_ok
         )
-        elapsed = time.time() - start
         
-        # Obtener stats del profiler
-        perf_stats = profiler.get_system_stats()
-        
-        return jsonify({
-            "benchmark": {
-                "num_texts": num_texts,
-                "num_results": len(results),
-                "elapsed_seconds": round(elapsed, 3),
-                "throughput_texts_per_sec": round(num_texts / elapsed, 2),
-                "avg_latency_ms": round(elapsed / num_texts * 1000, 2)
-            },
-            "performance": {
-                "cpu_percent": perf_stats['cpu']['percent'],
-                "memory_used_mb": perf_stats['memory']['used_mb'],
-                "memory_percent": perf_stats['memory']['percent']
-            },
-            "config": {
-                "faiss_enabled": use_faiss,
-                "parallel_processing": parallel
-            }
-        }), 200
-    
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ========== OPTIMIZACIÓN AUTOMÁTICA ==========
-
-@app.route('/api/optimize/auto', methods=['POST'])
-def auto_optimize():
-    """
-    Optimización automática del sistema
-    
-    POST /api/optimize/auto
-    """
-    recommendations = []
-    
-    # 1. Verificar FAISS
-    faiss_index = get_faiss_index()
-    if faiss_index:
-        stats = faiss_index.get_stats()
-        
-        # Sugerir upgrade si es necesario
-        if stats['total_papers'] > 10000 and stats.get('strategy') == 'flat':
-            recommendations.append({
-                "component": "FAISS",
-                "action": "upgrade_to_hnsw",
-                "reason": f"{stats['total_papers']} papers detectados, HNSW sería 100x más rápido"
-            })
-        
-        if stats.get('corrupted'):
-            recommendations.append({
-                "component": "FAISS",
-                "action": "repair_index",
-                "reason": "Índice corrupto detectado"
-            })
-    
-    # 2. Verificar memoria
-    profiler = get_profiler()
-    sys_stats = profiler.get_system_stats()
-    
-    if sys_stats['memory']['percent'] > 85:
-        recommendations.append({
-            "component": "Memory",
-            "action": "enable_compression",
-            "reason": f"Memoria alta ({sys_stats['memory']['percent']}%), activar compresión FAISS"
-        })
-    
-    # 3. Verificar APIs
-    validator = get_api_validator()
-    failing = validator.get_failing_apis()
-    
-    if failing:
-        recommendations.append({
-            "component": "APIs",
-            "action": "disable_failing_apis",
-            "reason": f"Desactivar temporalmente: {', '.join(failing)}"
-        })
-    
-    # 4. Aplicar optimizaciones automáticas
-    applied_optimizations = []
-    
-    for rec in recommendations:
-        if rec['action'] == 'repair_index' and faiss_index:
-            faiss_index.auto_repair()
-            applied_optimizations.append(f"✅ Índice FAISS reparado")
-        
-        if rec['action'] == 'upgrade_to_hnsw':
-            applied_optimizations.append(f"💡 Sugerencia: Reiniciar con init_optimized_faiss_index()")
-    
-    return jsonify({
-        "recommendations": recommendations,
-        "applied": applied_optimizations,
-        "status": "optimized" if applied_optimizations else "no_action_needed"
-    }), 200
-
-
-# ========== ENDPOINT DE STRESS TEST ==========
-
-@app.route('/api/stress-test', methods=['POST'])
-async def stress_test():
-    """
-    Stress test del sistema
-    
-    POST /api/stress-test
-    {
-        "concurrent_requests": 10,
-        "texts_per_request": 5
-    }
-    """
-    try:
-        data = request.get_json() or {}
-        concurrent = data.get('concurrent_requests', 10)
-        texts_per_req = data.get('texts_per_request', 5)
-        
-        # Generar requests concurrentes
-        test_texts = [
-            (f"p{i}", f"t{j}", f"test text {i}-{j} machine learning neural networks")
-            for i in range(concurrent)
-            for j in range(texts_per_req)
-        ]
-        
-        # Medir
-        start = time.time()
-        
-        # Simular requests concurrentes
-        tasks = []
-        for i in range(concurrent):
-            batch = test_texts[i*texts_per_req:(i+1)*texts_per_req]
-            task = asyncio.create_task(
-                asyncio.to_thread(
-                    process_similarity_batch,
-                    batch,
-                    "test",
-                    "en",
-                    get_redis_client(),
-                    get_http_client(),
-                    rate_limiter
-                )
+        recommendations = perf_report['recommendations'].copy()
+        if validator.get_failing_apis():
+            recommendations.append(
+                f"⚠️ {len(validator.get_failing_apis())} APIs con problemas"
             )
-            tasks.append(task)
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        elapsed = time.time() - start
-        
-        # Contar errores
-        errors = sum(1 for r in results if isinstance(r, Exception))
-        success = len(results) - errors
+        else:
+            recommendations.append("✅ Todas las APIs operativas")
         
         return jsonify({
-            "test": {
-                "concurrent_requests": concurrent,
-                "texts_per_request": texts_per_req,
-                "total_texts": len(test_texts)
+            "timestamp": time.time(),
+            "overall_health": "healthy" if overall_healthy else "degraded",
+            "components": {
+                "faiss": faiss_stats,
+                "redis": {"status": "connected" if redis_ok else "disconnected"},
+                "http_pool": {"status": "active" if http_ok else "inactive"},
+                "apis": api_report,
+                "performance": perf_report,
+                "circuit_breakers": circuit_status
             },
-            "results": {
-                "successful_requests": success,
-                "failed_requests": errors,
-                "total_time_seconds": round(elapsed, 3),
-                "avg_time_per_request_ms": round((elapsed / concurrent) * 1000, 2),
-                "throughput_requests_per_sec": round(concurrent / elapsed, 2)
-            },
-            "verdict": "PASS" if errors == 0 and elapsed < (concurrent * 2) else "FAIL"
+            "recommendations": recommendations
         }), 200
     
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# Inicialización al primer request
-@app.before_first_request
-def startup():
-    """Inicializa recursos al primer request"""
-    asyncio.run(init_resources())
-    init_faiss_index()
-    print("🚀 Sistema optimizado iniciado")
+    return app
 
 
 # Cleanup al cerrar
 def shutdown():
     """Limpia recursos al cerrar"""
-    asyncio.run(cleanup_resources())
-    print("👋 Recursos liberados")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(cleanup_resources())
+        logger.info("Recursos liberados")
+    finally:
+        loop.close()
 
 
 atexit.register(shutdown)
@@ -725,12 +651,14 @@ if __name__ == '__main__':
     print("   POST /api/faiss/clear        - Limpiar índice FAISS")
     print("   POST /api/faiss/save         - Guardar índice FAISS")
     print("   POST /api/faiss/search       - Búsqueda directa FAISS")
+    print("   POST /api/faiss/backup       - Backup FAISS")
+    print("   POST /api/validate-apis      - Validar APIs externas")
+    print("   GET  /api/diagnostics/full   - Diagnóstico completo")
     print("=" * 60)
     
-    # Inicializar recursos
-    asyncio.run(init_resources())
-    init_faiss_index()
+    app = create_app()
     
+    # Usar gunicorn en producción
     app.run(
         host='0.0.0.0', 
         port=5000, 

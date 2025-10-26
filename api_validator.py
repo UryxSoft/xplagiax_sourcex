@@ -1,5 +1,5 @@
 """
-Validador y Monitor de APIs Externas
+Validador y Monitor de APIs Externas - VERSIÓN CORREGIDA
 """
 import asyncio
 import time
@@ -7,8 +7,11 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime
 import json
+import logging
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,7 +55,7 @@ class APIValidator:
         }
     
     async def validate_api(self, source: str, client: httpx.AsyncClient) -> APIHealthMetrics:
-        """Valida una API específica"""
+        """Valida una API específica usando el cliente HTTP compartido"""
         errors = []
         latencies = []
         successful_requests = 0
@@ -62,6 +65,7 @@ class APIValidator:
         params = self.test_queries.get(source, {})
         
         if not url:
+            logger.warning(f"Endpoint no configurado para {source}")
             return APIHealthMetrics(
                 source=source,
                 status="down",
@@ -73,7 +77,7 @@ class APIValidator:
         
         response_sample = None
         
-        for _ in range(total_requests):
+        for attempt in range(total_requests):
             try:
                 start = time.time()
                 response = await client.get(url, params=params, timeout=10.0)
@@ -99,13 +103,21 @@ class APIValidator:
                     self._validate_response_structure(source, response, errors)
                 else:
                     errors.append(f"HTTP {response.status_code}")
+                    logger.warning(f"{source} retornó {response.status_code}")
             
             except httpx.TimeoutException:
                 errors.append("Timeout >10s")
+                logger.warning(f"{source} timeout en intento {attempt + 1}")
+            except httpx.ConnectError as e:
+                errors.append(f"Connection error: {str(e)[:30]}")
+                logger.warning(f"{source} connection error en intento {attempt + 1}")
             except Exception as e:
                 errors.append(f"Error: {str(e)[:50]}")
+                logger.error(f"{source} error inesperado", extra={"error": str(e)})
             
-            await asyncio.sleep(0.5)  # Evitar rate limits
+            # Evitar rate limits entre intentos
+            if attempt < total_requests - 1:
+                await asyncio.sleep(0.5)
         
         # Calcular métricas
         avg_latency = sum(latencies) / len(latencies) if latencies else 0
@@ -118,6 +130,12 @@ class APIValidator:
             status = "degraded"
         else:
             status = "down"
+        
+        logger.info(f"{source} validación completada", extra={
+            "status": status,
+            "success_rate": success_rate,
+            "avg_latency": avg_latency
+        })
         
         return APIHealthMetrics(
             source=source,
@@ -151,32 +169,68 @@ class APIValidator:
                 if "results" not in data:
                     errors.append("Schema inválido: falta 'results'")
             
+            elif source == "arxiv":
+                # arXiv retorna XML, no JSON
+                pass
+            
+            elif source == "europepmc":
+                if "resultList" not in data:
+                    errors.append("Schema inválido: falta 'resultList'")
+            
+            elif source == "doaj":
+                if "results" not in data:
+                    errors.append("Schema inválido: falta 'results'")
+            
+            elif source == "zenodo":
+                if "hits" not in data:
+                    errors.append("Schema inválido: falta 'hits'")
+            
             # Validación genérica: debe tener al menos un campo
             if not data or len(data) == 0:
                 errors.append("Respuesta vacía")
         
         except json.JSONDecodeError:
-            errors.append("Respuesta no es JSON válido")
+            # Algunas APIs retornan XML (arXiv)
+            if source not in ["arxiv"]:
+                errors.append("Respuesta no es JSON válido")
     
-    async def validate_all_apis(self) -> Dict[str, APIHealthMetrics]:
-        """Valida todas las APIs en paralelo"""
-        print("🔍 Validando todas las APIs externas...")
+    async def validate_all_apis(self, client: httpx.AsyncClient) -> Dict[str, APIHealthMetrics]:
+        """Valida todas las APIs en paralelo usando el cliente compartido"""
+        logger.info("Iniciando validación de todas las APIs externas")
         
-        async with httpx.AsyncClient() as client:
-            tasks = [
-                self.validate_api(source, client)
-                for source in self.endpoints.keys()
-            ]
-            results = await asyncio.gather(*tasks)
+        tasks = [
+            self.validate_api(source, client)
+            for source in self.endpoints.keys()
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Guardar métricas
+        # Guardar métricas y manejar excepciones
         for result in results:
+            if isinstance(result, Exception):
+                logger.error("Error validando API", extra={"error": str(result)})
+                continue
+            
             self.metrics[result.source] = result
         
+        logger.info(f"Validación completada: {len(self.metrics)} APIs verificadas")
         return self.metrics
     
     def get_health_report(self) -> Dict:
         """Genera reporte de salud"""
+        if not self.metrics:
+            return {
+                "summary": {
+                    "total_apis": 0,
+                    "healthy": 0,
+                    "degraded": 0,
+                    "down": 0,
+                    "overall_health": "unknown",
+                    "avg_latency_ms": 0,
+                    "avg_success_rate": 0
+                },
+                "apis": {}
+            }
+        
         total = len(self.metrics)
         healthy = sum(1 for m in self.metrics.values() if m.status == "healthy")
         degraded = sum(1 for m in self.metrics.values() if m.status == "degraded")
@@ -185,13 +239,21 @@ class APIValidator:
         avg_latency = sum(m.avg_latency_ms for m in self.metrics.values()) / total if total > 0 else 0
         avg_success = sum(m.success_rate for m in self.metrics.values()) / total if total > 0 else 0
         
+        # Determinar salud general
+        if down == 0:
+            overall_health = "healthy"
+        elif down < total / 2:
+            overall_health = "degraded"
+        else:
+            overall_health = "critical"
+        
         return {
             "summary": {
                 "total_apis": total,
                 "healthy": healthy,
                 "degraded": degraded,
                 "down": down,
-                "overall_health": "healthy" if down == 0 else "degraded" if degraded > 0 else "critical",
+                "overall_health": overall_health,
                 "avg_latency_ms": round(avg_latency, 2),
                 "avg_success_rate": round(avg_success, 2)
             },
@@ -209,21 +271,35 @@ class APIValidator:
             if metrics.status in ["degraded", "down"]
         ]
     
-    async def continuous_monitoring(self, interval_seconds: int = 300):
-        """Monitoreo continuo (cada 5 minutos)"""
+    async def continuous_monitoring(self, client: httpx.AsyncClient, interval_seconds: int = 300):
+        """Monitoreo continuo (cada 5 minutos por defecto)"""
+        logger.info(f"Iniciando monitoreo continuo (intervalo: {interval_seconds}s)")
+        
         while True:
-            await self.validate_all_apis()
-            report = self.get_health_report()
+            try:
+                await self.validate_all_apis(client)
+                report = self.get_health_report()
+                
+                logger.info("Reporte de salud", extra={
+                    "healthy": report['summary']['healthy'],
+                    "total": report['summary']['total_apis'],
+                    "avg_latency_ms": report['summary']['avg_latency_ms']
+                })
+                
+                failing = self.get_failing_apis()
+                if failing:
+                    logger.warning("APIs con problemas detectadas", extra={
+                        "failing_apis": failing
+                    })
+                
+                await asyncio.sleep(interval_seconds)
             
-            print(f"\n📊 Reporte de Salud ({datetime.now().strftime('%H:%M:%S')})")
-            print(f"   Healthy: {report['summary']['healthy']}/{report['summary']['total_apis']}")
-            print(f"   Latencia promedio: {report['summary']['avg_latency_ms']}ms")
-            
-            failing = self.get_failing_apis()
-            if failing:
-                print(f"   ⚠️ APIs con problemas: {', '.join(failing)}")
-            
-            await asyncio.sleep(interval_seconds)
+            except asyncio.CancelledError:
+                logger.info("Monitoreo continuo cancelado")
+                break
+            except Exception as e:
+                logger.error("Error en monitoreo continuo", extra={"error": str(e)})
+                await asyncio.sleep(interval_seconds)
 
 
 # Instancia global
