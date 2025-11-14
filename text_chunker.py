@@ -74,7 +74,7 @@ def chunk_text_sliding_window(text: str, window_size: int = 50, overlap: int = 1
     
     return chunks
 
-
+#this
 def analyze_text_structure(text: str) -> dict:
     """
     Analiza estructura del texto para determinar mejor estrategia
