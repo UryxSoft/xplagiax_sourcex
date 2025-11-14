@@ -347,3 +347,182 @@ async def search_zenodo(query: str, theme: str, client: httpx.AsyncClient, rate_
     except Exception as e:
         print(f"Error Zenodo: {e}")
     return []
+
+async def search_core(query: str, theme: str, client: httpx.AsyncClient, rate_limiter) -> List[Dict]:
+    """
+    CORE - Massive open access repository
+    Docs: https://core.ac.uk/documentation/api
+    """
+    if not await rate_limiter.can_make_request("core"):
+        return []
+    
+    try:
+        url = "https://api.core.ac.uk/v3/search/works"
+        headers = {"Authorization": "Bearer YOUR_API_KEY"}  # Gratis en core.ac.uk
+        params = {
+            "q": f"{theme} {query}",
+            "limit": 5
+        }
+        response = await client.get(url, params=params, headers=headers)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            for paper in data.get("results", []):
+                abstract = paper.get("abstract", "")
+                if abstract:
+                    results.append({
+                        "title": paper.get("title", "Unknown"),
+                        "abstract": abstract,
+                        "author": paper.get("authors", [{}])[0].get("name", "Unknown") if paper.get("authors") else "Unknown",
+                        "type": "article",
+                        "publication_date": str(paper.get("yearPublished", "Unknown")),
+                        "doi": paper.get("doi"),
+                        "url": paper.get("downloadUrl")
+                    })
+            return results
+    except Exception as e:
+        print(f"Error CORE: {e}")
+    return []
+
+
+async def search_base(query: str, theme: str, client: httpx.AsyncClient, rate_limiter) -> List[Dict]:
+    """
+    BASE - Bielefeld Academic Search Engine
+    Docs: https://www.base-search.net/about/en/about_develop.php
+    """
+    if not await rate_limiter.can_make_request("base"):
+        return []
+    
+    try:
+        url = "https://api.base-search.net/cgi-bin/BaseHttpSearchInterface.fcgi"
+        params = {
+            "func": "PerformSearch",
+            "query": f"{theme} {query}",
+            "format": "json",
+            "hits": 5
+        }
+        response = await client.get(url, params=params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            for doc in data.get("response", {}).get("docs", []):
+                abstract = doc.get("dcabstract", [""])[0] if isinstance(doc.get("dcabstract"), list) else doc.get("dcabstract", "")
+                if abstract:
+                    results.append({
+                        "title": doc.get("dctitle", ["Unknown"])[0] if isinstance(doc.get("dctitle"), list) else doc.get("dctitle", "Unknown"),
+                        "abstract": abstract,
+                        "author": doc.get("dccreator", ["Unknown"])[0] if isinstance(doc.get("dccreator"), list) else doc.get("dccreator", "Unknown"),
+                        "type": doc.get("dctypenorm", ["article"])[0] if isinstance(doc.get("dctypenorm"), list) else doc.get("dctypenorm", "article"),
+                        "publication_date": doc.get("dcyear", ["Unknown"])[0] if isinstance(doc.get("dcyear"), list) else doc.get("dcyear", "Unknown"),
+                        "doi": doc.get("dcdoi", [None])[0] if isinstance(doc.get("dcdoi"), list) else doc.get("dcdoi"),
+                        "url": doc.get("dclink", [None])[0] if isinstance(doc.get("dclink"), list) else doc.get("dclink")
+                    })
+            return results
+    except Exception as e:
+        print(f"Error BASE: {e}")
+    return []
+
+
+async def search_internet_archive_scholar(query: str, theme: str, client: httpx.AsyncClient, rate_limiter) -> List[Dict]:
+    """
+    Internet Archive Scholar
+    Docs: https://scholar.archive.org/
+    """
+    if not await rate_limiter.can_make_request("internet_archive"):
+        return []
+    
+    try:
+        url = "https://scholar-api.archive.org/search"
+        params = {
+            "q": f"{theme} {query}",
+            "limit": 5
+        }
+        response = await client.get(url, params=params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            for paper in data.get("hits", []):
+                abstract = paper.get("abstract", "")
+                if abstract:
+                    results.append({
+                        "title": paper.get("title", "Unknown"),
+                        "abstract": abstract,
+                        "author": paper.get("contrib_names", ["Unknown"])[0] if paper.get("contrib_names") else "Unknown",
+                        "type": "article",
+                        "publication_date": str(paper.get("year", "Unknown")),
+                        "doi": paper.get("doi"),
+                        "url": f"https://archive.org/details/{paper.get('key')}" if paper.get('key') else None
+                    })
+            return results
+    except Exception as e:
+        print(f"Error Internet Archive: {e}")
+    return []
+
+async def search_unpaywall(doi: str, client: httpx.AsyncClient) -> Dict:
+    """
+    Unpaywall - Encuentra versión open access de un paper por DOI
+    Docs: https://unpaywall.org/products/api
+    
+    Nota: Esta función busca por DOI, usar después de encontrar papers en otras APIs
+    """
+    try:
+        url = f"https://api.unpaywall.org/v2/{doi}"
+        params = {"email": "rgonzalez@uryxtech.com"}  # Requerido
+        response = await client.get(url, params=params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("is_oa"):
+                return {
+                    "title": data.get("title"),
+                    "abstract": data.get("abstract"),
+                    "author": data.get("z_authors", [{}])[0].get("family", "Unknown") if data.get("z_authors") else "Unknown",
+                    "type": "article",
+                    "publication_date": str(data.get("year")),
+                    "doi": doi,
+                    "url": data.get("best_oa_location", {}).get("url")
+                }
+    except Exception as e:
+        print(f"Error Unpaywall: {e}")
+    return {}
+
+
+async def search_hal(query: str, theme: str, client: httpx.AsyncClient, rate_limiter) -> List[Dict]:
+    """
+    HAL - French open archive
+    Docs: https://api.archives-ouvertes.fr/docs/search
+    """
+    if not await rate_limiter.can_make_request("hal"):
+        return []
+    
+    try:
+        url = "https://api.archives-ouvertes.fr/search/"
+        params = {
+            "q": f"{theme} {query}",
+            "rows": 5,
+            "wt": "json"
+        }
+        response = await client.get(url, params=params)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            for doc in data.get("response", {}).get("docs", []):
+                abstract = doc.get("abstract_s", [""])[0] if isinstance(doc.get("abstract_s"), list) else doc.get("abstract_s", "")
+                if abstract:
+                    results.append({
+                        "title": doc.get("title_s", ["Unknown"])[0] if isinstance(doc.get("title_s"), list) else doc.get("title_s", "Unknown"),
+                        "abstract": abstract,
+                        "author": doc.get("authFullName_s", ["Unknown"])[0] if isinstance(doc.get("authFullName_s"), list) else doc.get("authFullName_s", "Unknown"),
+                        "type": doc.get("docType_s", "article"),
+                        "publication_date": str(doc.get("publicationDateY_i", "Unknown")),
+                        "doi": doc.get("doiId_s"),
+                        "url": doc.get("uri_s")
+                    })
+            return results
+    except Exception as e:
+        print(f"Error HAL: {e}")
+    return []

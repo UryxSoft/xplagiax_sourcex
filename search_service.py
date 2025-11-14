@@ -17,7 +17,7 @@ from cache import get_from_cache, save_to_cache, get_cache_key
 from searchers import (
     search_crossref, search_pubmed, search_semantic_scholar,
     search_arxiv, search_openalex, search_europepmc,
-    search_doaj, search_zenodo
+    search_doaj, search_zenodo,search_core, search_base, search_internet_archive_scholar, search_hal
 )
 from faiss_service import get_faiss_index
 
@@ -44,6 +44,10 @@ async def search_all_sources(
         "europepmc": lambda q, t, c, rl: search_europepmc(q, t, c, rl),
         "doaj": lambda q, t, c, rl: search_doaj(q, t, c, rl),
         "zenodo": lambda q, t, c, rl: search_zenodo(q, t, c, rl),
+        "core": lambda q, t, c, rl: search_core(q, t, c, rl),
+        "base": lambda q, t, c, rl: search_base(q, t, c, rl),
+        "internet_archive": lambda q, t, c, rl: search_internet_archive_scholar(q, t, c, rl),
+        "hal": lambda q, t, c, rl: search_hal(q, t, c, rl),
     }
     
     # Filtrar fuentes si se especifican
@@ -89,7 +93,7 @@ def process_similarity_batch(
     rate_limiter,
     sources: Optional[List[str]] = None,
     use_faiss: bool = True,
-    threshold: float = None  # ✅ NUEVO parámetro
+    threshold: float = None  #  NUEVO parámetro
 ) -> List[SearchResult]:
     """
     Procesa batch de textos con vectorización completa y FAISS
@@ -107,7 +111,7 @@ def process_similarity_batch(
         "theme": theme,
         "idiom": idiom,
         "use_faiss": use_faiss,
-        "threshold": threshold,  # ✅ Log
+        "threshold": threshold,  # Log
         "faiss_papers": faiss_index.index.ntotal if faiss_index else 0
     })
     

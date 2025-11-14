@@ -40,7 +40,12 @@ class APIValidator:
             "openalex": {"search": "artificial intelligence", "per-page": 1},
             "europepmc": {"query": "cancer", "pageSize": 1, "format": "json"},
             "doaj": {"pageSize": 1},
-            "zenodo": {"q": "dataset", "size": 1}
+            "zenodo": {"q": "dataset", "size": 1},
+            
+            "core": {"q": "machine learning", "limit": 1},
+            "base": {"func": "PerformSearch", "query": "AI", "format": "json", "hits": 1},
+            "internet_archive": {"q": "science", "limit": 1},
+            "hal": {"q": "intelligence artificielle", "rows": 1, "wt": "json"},
         }
         
         self.endpoints = {
@@ -51,7 +56,12 @@ class APIValidator:
             "openalex": "https://api.openalex.org/works",
             "europepmc": "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
             "doaj": "https://doaj.org/api/v2/search/articles/test",
-            "zenodo": "https://zenodo.org/api/records"
+            "zenodo": "https://zenodo.org/api/records",
+
+            "core": "https://api.core.ac.uk/v3/search/works",
+            "base": "https://api.base-search.net/cgi-bin/BaseHttpSearchInterface.fcgi",
+            "internet_archive": "https://scholar-api.archive.org/search",
+            "hal": "https://api.archives-ouvertes.fr/search/",
         }
     
     async def validate_api(self, source: str, client: httpx.AsyncClient) -> APIHealthMetrics:

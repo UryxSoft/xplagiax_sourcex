@@ -34,6 +34,9 @@ class Config:
         "biorxiv": 30,
         "zenodo": 60,
         "osf": 50,
+        "base": 50,
+        "internet_archive": 30,
+        "hal": 50,
     }
     
     # Circuit breaker
