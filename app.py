@@ -23,6 +23,7 @@ from profiler import get_profiler, profile
 from faiss_service import get_faiss_index, init_faiss_index
 from logging_config import setup_logging
 from input_validator import validate_similarity_input
+from deduplication_service import get_deduplicator  
 
 # Configuración de logging
 logger = setup_logging()
@@ -638,6 +639,23 @@ faiss_indexed_papers {faiss_papers}
             logger.error("Error creando backup", extra={"error": str(e)})
             return jsonify({"error": str(e)}), 500
     
+    # ✅ NUEVO ENDPOINT (agregar después de faiss_backup)
+    @app.route('/api/deduplication/stats', methods=['GET'])
+    def deduplication_stats():
+        """Estadísticas del sistema de deduplicación"""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                deduplicator = loop.run_until_complete(get_deduplicator())
+                stats = loop.run_until_complete(deduplicator.get_stats())
+                return jsonify(stats), 200
+            finally:
+                loop.close()
+        
+        except Exception as e:
+            logger.error("Error obteniendo stats de deduplicación", extra={"error": str(e)})
+            return jsonify({"error": str(e)}), 500
     # ========== ENDPOINTS DE VALIDACIÓN DE APIS ==========
     
     @app.route('/api/validate-apis', methods=['POST'])
@@ -801,6 +819,12 @@ def shutdown():
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(cleanup_resources())
+        
+        # Cerrar deduplicator
+        from deduplication_service import _deduplicator
+        if _deduplicator:
+            loop.run_until_complete(_deduplicator.close())
+        
         logger.info("Recursos liberados")
     finally:
         loop.close()

@@ -8,6 +8,7 @@ from typing import List, Dict, Tuple, Optional
 from dataclasses import asdict
 
 from html_cleaner import clean_html
+from deduplication_service import get_deduplicator 
 
 from config import Config
 from models import SearchResult
@@ -268,27 +269,49 @@ def process_similarity_batch(
         # 4. Agregar todos los papers nuevos a FAISS en UN SOLO BATCH
         if papers_to_add and faiss_index:
             try:
-                # AGREGAR: Deduplicar antes de agregar a FAISS
-                seen_titles = set()
-                unique_papers = []
-                unique_metadata = []
+                # Obtener deduplicator en contexto síncrono
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 
-                for paper, meta in zip(papers_to_add, metadata_to_add):
-                    title_key = meta['title'].lower().strip()
-                    if title_key not in seen_titles:
-                        seen_titles.add(title_key)
-                        unique_papers.append(paper)
-                        unique_metadata.append(meta)
+                try:
+                    from deduplication_service import get_deduplicator
+                    deduplicator = loop.run_until_complete(get_deduplicator())
+                    
+                    # Verificar cuáles papers NO existen en SQLite
+                    exists_map = loop.run_until_complete(
+                        deduplicator.batch_check_exists(metadata_to_add)
+                    )
+                    
+                    unique_papers = []
+                    unique_metadata = []
+                    
+                    for paper, meta in zip(papers_to_add, metadata_to_add):
+                        title_hash = deduplicator._get_title_hash(meta['title'])
+                        if not exists_map.get(title_hash, False):
+                            unique_papers.append(paper)
+                            unique_metadata.append(meta)
+                    
+                    logger.info(f"Deduplicación SQLite: {len(papers_to_add)} → {len(unique_papers)} papers nuevos")
+                    
+                    if unique_papers:
+                        # Agregar a FAISS primero
+                        current_faiss_id = faiss_index.index.ntotal
+                        faiss_index.add_papers(unique_papers, unique_metadata)
+                        
+                        # Guardar en SQLite con FAISS IDs
+                        loop.run_until_complete(
+                            deduplicator.batch_add_papers(unique_metadata, current_faiss_id)
+                        )
+                        
+                        logger.info(f"✅ Agregados {len(unique_papers)} papers: FAISS (embeddings) + SQLite (metadata)")
                 
-                logger.info(f"Deduplicación antes de FAISS: {len(papers_to_add)} → {len(unique_papers)} papers")
-                
-                if unique_papers:
-                    faiss_index.add_papers(unique_papers, unique_metadata)
+                finally:
+                    loop.close()
+                    
             except MemoryError:
                 logger.warning("Memoria insuficiente, FAISS manejando automáticamente")
             except Exception as e:
-                logger.error("Error agregando papers a FAISS", extra={"error": str(e)})
-    
+                logger.error("Error agregando papers", extra={"error": str(e)})
     # 5. Guardar índice FAISS actualizado
     if faiss_index and faiss_index.index.ntotal > 0:
         try:
