@@ -20,9 +20,10 @@ class APIHealthMetric:
 
 
 class APIValidator:
-    """Validate external APIs"""
+    """Validate external APIs health"""
     
     def __init__(self):
+        """Initialize API validator"""
         self.endpoints = {
             'crossref': 'https://api.crossref.org/works?rows=1',
             'pubmed': 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&retmax=1&retmode=json&term=test',
@@ -71,12 +72,22 @@ class APIValidator:
             metric = APIHealthMetric(
                 source=source,
                 available=available,
-                response_time_ms=elapsed_ms,
+                response_time_ms=round(elapsed_ms, 2),
                 error=error
             )
             
             self.metrics[source] = metric
             
+            return metric
+        
+        except httpx.TimeoutException:
+            metric = APIHealthMetric(
+                source=source,
+                available=False,
+                response_time_ms=5000,
+                error="Timeout"
+            )
+            self.metrics[source] = metric
             return metric
         
         except Exception as e:
@@ -86,9 +97,7 @@ class APIValidator:
                 response_time_ms=0,
                 error=str(e)
             )
-            
             self.metrics[source] = metric
-            
             return metric
     
     async def validate_all_apis(self, http_client: httpx.AsyncClient):
@@ -101,19 +110,37 @@ class APIValidator:
         await asyncio.gather(*tasks, return_exceptions=True)
     
     def get_health_report(self) -> Dict:
-        """Get health report for all APIs"""
+        """
+        Get health report for all APIs
+        
+        Returns:
+            Dict with summary and detailed metrics
+        """
         available_count = sum(
             1 for m in self.metrics.values() if m.available
         )
         
         total_count = len(self.metrics)
         
+        # Calculate average response time for available APIs
+        available_times = [
+            m.response_time_ms
+            for m in self.metrics.values()
+            if m.available
+        ]
+        
+        avg_response_time = (
+            sum(available_times) / len(available_times)
+            if available_times else 0
+        )
+        
         return {
             'summary': {
                 'total_apis': total_count,
                 'available': available_count,
                 'unavailable': total_count - available_count,
-                'overall_health': 'healthy' if available_count == total_count else 'degraded'
+                'overall_health': 'healthy' if available_count == total_count else 'degraded',
+                'avg_response_time_ms': round(avg_response_time, 2)
             },
             'apis': {
                 source: {
@@ -126,7 +153,12 @@ class APIValidator:
         }
     
     def get_failing_apis(self) -> List[str]:
-        """Get list of failing API sources"""
+        """
+        Get list of failing API sources
+        
+        Returns:
+            List of source names
+        """
         return [
             source for source, metric in self.metrics.items()
             if not metric.available
@@ -138,5 +170,10 @@ _validator = APIValidator()
 
 
 def get_api_validator() -> APIValidator:
-    """Get global validator instance"""
+    """
+    Get global validator instance
+    
+    Returns:
+        APIValidator singleton
+    """
     return _validator

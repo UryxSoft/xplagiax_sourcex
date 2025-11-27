@@ -20,6 +20,14 @@ def run_async(coro: Coroutine) -> Any:
     
     Returns:
         Result of the coroutine
+    
+    Examples:
+        >>> async def fetch_data():
+        ...     return "data"
+        >>> 
+        >>> result = run_async(fetch_data())
+        >>> print(result)
+        'data'
     """
     try:
         # Try to get existing event loop
@@ -45,3 +53,39 @@ def run_async(coro: Coroutine) -> Any:
             return loop.run_until_complete(coro)
         finally:
             loop.close()
+    
+    except Exception as e:
+        logger.error(f"Error running async coroutine: {e}", exc_info=True)
+        raise
+
+
+async def run_in_executor(func, *args, **kwargs):
+    """
+    Run synchronous function in executor to avoid blocking
+    
+    Args:
+        func: Synchronous function
+        *args: Positional arguments
+        **kwargs: Keyword arguments
+    
+    Returns:
+        Function result
+    
+    Examples:
+        >>> def blocking_task(x):
+        ...     time.sleep(1)
+        ...     return x * 2
+        >>> 
+        >>> result = await run_in_executor(blocking_task, 5)
+        >>> print(result)
+        10
+    """
+    loop = asyncio.get_event_loop()
+    
+    # Use functools.partial for kwargs
+    from functools import partial
+    
+    if kwargs:
+        func = partial(func, **kwargs)
+    
+    return await loop.run_in_executor(None, func, *args)

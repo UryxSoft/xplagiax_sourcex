@@ -23,6 +23,13 @@ def get_stopwords(language: str) -> Set[str]:
     
     Returns:
         Set of stopwords
+    
+    Examples:
+        >>> stopwords = get_stopwords('en')
+        >>> 'the' in stopwords
+        True
+        >>> 'hello' in stopwords
+        False
     """
     if language not in SUPPORTED_LANGUAGES:
         logger.warning(
@@ -34,13 +41,33 @@ def get_stopwords(language: str) -> Set[str]:
         from nltk.corpus import stopwords
         return set(stopwords.words(_language_code_to_nltk(language)))
     
+    except LookupError:
+        # Try to download stopwords
+        logger.info(f"Downloading NLTK stopwords for {language}...")
+        try:
+            import nltk
+            nltk.download('stopwords', quiet=True)
+            from nltk.corpus import stopwords
+            return set(stopwords.words(_language_code_to_nltk(language)))
+        except Exception as e:
+            logger.error(f"Failed to download NLTK stopwords: {e}")
+            return set()
+    
     except Exception as e:
         logger.error(f"Error loading stopwords: {e}")
         return set()
 
 
 def _language_code_to_nltk(lang_code: str) -> str:
-    """Convert language code to NLTK language name"""
+    """
+    Convert language code to NLTK language name
+    
+    Args:
+        lang_code: ISO 639-1 language code
+    
+    Returns:
+        NLTK language name
+    """
     mapping = {
         'en': 'english',
         'es': 'spanish',
@@ -64,6 +91,10 @@ def remove_stopwords_optimized(text: str, language: str = 'en') -> str:
     
     Returns:
         Text with stopwords removed
+    
+    Examples:
+        >>> remove_stopwords_optimized("the quick brown fox", "en")
+        'quick brown fox'
     """
     if not text:
         return ""
@@ -71,9 +102,20 @@ def remove_stopwords_optimized(text: str, language: str = 'en') -> str:
     stopwords_set = get_stopwords(language)
     
     if not stopwords_set:
+        logger.warning(f"No stopwords available for {language}, returning original text")
         return text
     
     words = text.split()
     filtered_words = [w for w in words if w.lower() not in stopwords_set]
     
     return ' '.join(filtered_words)
+
+
+def get_supported_languages() -> list:
+    """
+    Get list of supported languages
+    
+    Returns:
+        List of language codes
+    """
+    return sorted(list(SUPPORTED_LANGUAGES))

@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        - INSTALL_DEV=true
+    container_name: xplagiax_dev
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+      - REDIS_URL=redis://redis:6379/0
+      - LOG_LEVEL=DEBUG
+      - ENABLE_PROFILING=true
+    volumes:
+      # Mount source code for hot reload
+      - ../app:/app/app:ro
+      - ../configs:/app/configs:ro
+      - ../scripts:/app/scripts:ro
+      - dev_data:/app/data
+      - dev_logs:/app/logs
+    depends_on:
+      - redis
+    networks:
+      - xplagiax_dev_network
+    command: >
+      flask run
+      --host=0.0.0.0
+      --port=5000
+      --reload
+      --debugger
+
+  redis:
+    image: redis:7-alpine
+    container_name: xplagiax_redis_dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - dev_redis_data:/data
+    networks:
+      - xplagiax_dev_network
+
+  # Optional: Redis Commander (Redis GUI)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: xplagiax_redis_commander
+    restart: unless-stopped
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - xplagiax_dev_network
+
+volumes:
+  dev_data:
+  dev_logs:
+  dev_redis_data:
+
+networks:
+  xplagiax_dev_network:
+    driver: bridge

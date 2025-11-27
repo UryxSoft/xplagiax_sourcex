@@ -10,7 +10,14 @@ from app.services.external_apis.crossref_searcher import CrossrefSearcher
 from app.services.external_apis.pubmed_searcher import PubMedSearcher
 from app.services.external_apis.semantic_scholar_searcher import SemanticScholarSearcher
 from app.services.external_apis.arxiv_searcher import ArXivSearcher
-from app.services.external_apis.base_searcher import BaseSearcher
+from app.services.external_apis.openalex_searcher import OpenAlexSearcher
+from app.services.external_apis.europepmc_searcher import EuropePMCSearcher
+from app.services.external_apis.doaj_searcher import DOAJSearcher
+from app.services.external_apis.zenodo_searcher import ZenodoSearcher
+from app.services.external_apis.core_searcher import CORESearcher
+from app.services.external_apis.internet_archive_searcher import InternetArchiveScholarSearcher
+from app.services.external_apis.unpaywall_searcher import UnpaywallSearcher
+from app.services.external_apis.hal_searcher import HALSearcher
 
 logger = logging.getLogger(__name__)
 
@@ -19,22 +26,23 @@ class APIManager:
     """Manages all external API searchers"""
     
     def __init__(self):
+        """Initialize all searchers"""
         self.searchers = {
             'crossref': CrossrefSearcher(),
             'pubmed': PubMedSearcher(),
             'semantic_scholar': SemanticScholarSearcher(),
-            'arxiv': ArXivSearcher(),          
-            'base': BaseSearcher(),
-            'openalex':,
-            'europepmc':,
-            'doaj':,
-            'zenodo':,
-            'core':,
-            'internet_archive_scholar':,
-            'unpaywall':,
-            'hal':,
-            # Add more searchers here as they're implemented
+            'arxiv': ArXivSearcher(),
+            'openalex': OpenAlexSearcher(),
+            'europepmc': EuropePMCSearcher(),
+            'doaj': DOAJSearcher(),
+            'zenodo': ZenodoSearcher(),
+            'core': CORESearcher(),
+            'internet_archive': InternetArchiveScholarSearcher(),
+            'unpaywall': UnpaywallSearcher(),
+            'hal': HALSearcher(),
         }
+        
+        logger.info(f"✅ APIManager initialized with {len(self.searchers)} searchers")
     
     async def search_all_sources(
         self,
@@ -90,6 +98,10 @@ class APIManager:
             
             if response.success:
                 all_papers.extend(response.papers)
+                
+                logger.debug(
+                    f"{response.source}: {len(response.papers)} papers"
+                )
             else:
                 logger.warning(
                     f"{response.source} failed: {response.error}"
@@ -106,3 +118,6 @@ class APIManager:
         """Get list of available source names"""
         return list(self.searchers.keys())
     
+    def get_searcher(self, source: str):
+        """Get specific searcher by name"""
+        return self.searchers.get(source)

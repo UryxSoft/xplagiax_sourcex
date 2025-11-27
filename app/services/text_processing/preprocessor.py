@@ -5,6 +5,7 @@ import re
 import logging
 from typing import Set
 from app.utils.stopwords import remove_stopwords_optimized
+from app.utils.html_cleaner import clean_html
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ class TextPreprocessor:
             return ""
         
         # 1. Lowercase
-        text = text.lower()
+        text = clean_html(text, allow_safe_tags=False)
         
         # 2. Remove URLs
         text = self.url_pattern.sub('', text)
