@@ -97,266 +97,343 @@ curl -X POST http://localhost:5000/api/faiss/search \
   }'
 
 # 🔬 xplagiax_sourcex - Academic Search Service
+# xplagiax_sourcex - Academic Plagiarism Detection API
 
-Sistema de búsqueda académica con similitud semántica utilizando FAISS, múltiples APIs y machine learning.
+> **Production-grade Flask API** for detecting plagiarism through semantic similarity search across 12 academic databases with local FAISS vector indexing.
 
-## 🚀 Inicio Rápido
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
+[![Flask](https://img.shields.io/badge/flask-3.1-green.svg)](https://flask.palletsprojects.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-### 1. Configuración
+---
+
+## 🚀 Quick Start
 
 ```bash
-# Clonar repositorio
+# 1. Clone & setup
 git clone <repo-url>
 cd xplagiax_sourcex
 
-# Copiar configuración
+# 2. Configure environment
 cp .env.example .env
+# Edit .env - IMPORTANT: Set ADMIN_API_KEY and FLASK_SECRET_KEY
 
-# Generar secretos (Linux/Mac)
-echo "REDIS_PASSWORD=$(openssl rand -base64 32)" >> .env
-echo "FLASK_SECRET_KEY=$(openssl rand -base64 48)" >> .env
-
-# Editar .env con tu configuración
-nano .env
-```
-
-### 2. Construir y Ejecutar
-
-```bash
-# Construir e iniciar servicios
+# 3. Start with Docker
 docker-compose up --build
 
-# En segundo plano
-docker-compose up -d
-
-# Ver logs
-docker-compose logs -f app
-```
-
-### 3. Verificar Estado
-
-```bash
-# Health check
+# 4. Verify
 curl http://localhost:5000/api/health
-
-# Estadísticas FAISS
-curl http://localhost:5000/api/faiss/stats
 ```
 
-## 📊 Arquitectura
+---
+
+## 📊 Architecture
 
 ```
-┌─────────────┐
-│   Cliente   │
-└──────┬──────┘
-       │
-       ▼
-┌─────────────────────────┐
-│   Flask + Gunicorn      │
-│   (4 workers)           │
-└──────┬──────────────────┘
-       │
-       ├──► Redis (Caché)
-       ├──► FAISS (Búsqueda vectorial)
-       └──► APIs Externas:
-            • Crossref
-            • PubMed
-            • Semantic Scholar
-            • arXiv
-            • OpenAlex
-            • Europe PMC
-            • DOAJ
-            • Zenodo
+┌─────────────────────────────────────────────────────┐
+│   Client Request                                    │
+└──────────────┬──────────────────────────────────────┘
+               ↓
+┌──────────────────────────────────────────────────────┐
+│   Flask + Gunicorn (4 workers)                       │
+│   • Blueprints (modular routes)                      │
+│   • Rate limiting (Redis-backed)                     │
+│   • Input validation & sanitization                  │
+│   • Circuit breakers                                 │
+│   • Admin endpoints (API key protected)              │
+└──────────────┬───────────────────────────────────────┘
+               ↓
+        ┌──────┴──────┐
+        ↓             ↓
+┌──────────────┐ ┌────────────────────┐
+│ Redis Cache  │ │ FAISS Vector Index │
+│ (24h TTL)    │ │ (384D embeddings)  │
+│ orjson       │ │ IndexIDMap         │
+└──────────────┘ └────────────────────┘
+        ↓             ↓
+┌───────────────────────────────────────────────┐
+│ Academic APIs (12 sources, parallel search)   │
+│ Crossref • PubMed • Semantic Scholar • arXiv  │
+│ OpenAlex • Europe PMC • DOAJ • Zenodo         │
+│ CORE • BASE • Internet Archive • HAL          │
+└───────────────────────────────────────────────┘
 ```
 
-## 🔌 Endpoints Principales
+---
 
-### Búsqueda de Similitud
+## ✨ Key Features
 
-```bash
-POST /api/similarity-search
-Content-Type: application/json
+### 🔍 Search & Detection
+- **Vector Similarity Search**: <200ms for 1M papers via FAISS
+- **12 Academic APIs**: Parallel search with circuit breakers
+- **Semantic Analysis**: 384-dimensional embeddings (MiniLM)
+- **Plagiarism Levels**: 5-tier classification (very_high → minimal)
 
+### 🚀 Performance
+- **Redis Caching**: 24h TTL, orjson serialization (5x faster than pickle)
+- **Bloom Filter Dedup**: O(1) duplicate detection
+- **HTTP/2 Connection Pool**: 20 persistent connections
+- **Batch Processing**: 64 embeddings per batch
+
+### 🔒 Security
+- **API Key Authentication**: Admin endpoints protected
+- **CORS Configuration**: Whitelist-based (no wildcards in production)
+- **Input Sanitization**: XSS/injection protection
+- **Rate Limiting**: Redis-backed, per-IP and per-endpoint
+
+### 📈 Observability
+- **Prometheus Metrics**: `/api/metrics` endpoint
+- **Health Checks**: Comprehensive system diagnostics
+- **Structured Logging**: JSON format (optional)
+- **Performance Profiling**: Built-in bottleneck detection
+
+---
+
+## 🔌 API Endpoints
+
+### Search Endpoints
+
+#### POST `/api/similarity-search`
+Main similarity search endpoint.
+
+**Request:**
+```json
 {
   "data": [
-    "machine learning",
-    "en",
+    "machine learning",  // theme
+    "en",                // language (en, es, fr, de, pt, it, ru, zh, ja, ko)
     [
-      ["page1", "para1", "Neural networks are computational models"],
-      ["page1", "para2", "Deep learning uses multiple layers"]
+      ["page1", "para1", "Neural networks are computational models..."]
     ]
   ],
-  "use_faiss": true,
-  "sources": ["semantic_scholar", "arxiv"]
+  "threshold": 0.75,  // optional (0.0-1.0, default: 0.70)
+  "use_faiss": true,  // optional (default: true)
+  "sources": ["semantic_scholar", "arxiv"]  // optional
 }
 ```
 
-**Respuesta:**
-
+**Response:**
 ```json
 {
   "results": [
     {
       "fuente": "semantic_scholar",
-      "texto_original": "Neural networks are...",
-      "texto_encontrado": "This paper presents...",
       "porcentaje_match": 89.2,
       "documento_coincidente": "Deep Learning Book",
-      "autor": "Goodfellow",
-      "type_document": "article"
+      "autor": "Goodfellow et al.",
+      "type_document": "article",
+      "plagiarism_level": "very_high",
+      "publication_date": "2016",
+      "doi": "10.1234/example",
+      "url": "https://..."
     }
   ],
   "count": 10,
-  "processed_texts": 2,
+  "threshold_used": 0.75,
   "faiss_enabled": true
 }
 ```
 
-### FAISS
+#### POST `/api/plagiarism-check`
+Specialized plagiarism detection with text chunking.
 
-```bash
-# Estadísticas
-GET /api/faiss/stats
-
-# Búsqueda directa
-POST /api/faiss/search
+**Request:**
+```json
 {
-  "query": "deep learning neural networks",
-  "k": 20,
-  "threshold": 0.75
-}
-
-# Guardar índice
-POST /api/faiss/save
-
-# Backup
-POST /api/faiss/backup
-
-# Limpiar
-POST /api/faiss/clear
-```
-
-### Monitoreo
-
-```bash
-# Health check
-GET /api/health
-
-# Métricas Prometheus
-GET /api/metrics
-
-# Diagnóstico completo
-GET /api/diagnostics/full
-
-# Validar APIs externas
-POST /api/validate-apis
-
-# Profiler
-GET /api/profiler/stats
-GET /api/profiler/bottlenecks?top=10
-```
-
-### Administración
-
-```bash
-# Limpiar caché
-POST /api/cache/clear
-
-# Reiniciar rate limits
-POST /api/reset-limits
-
-# Benchmark
-POST /api/benchmark
-{
-  "num_texts": 50
+  "data": ["theme", "en", [["page", "para", "text"]]],
+  "threshold": 0.70,
+  "chunk_mode": "sentences",  // "sentences" or "sliding"
+  "min_chunk_words": 15
 }
 ```
 
-## 🔐 Seguridad
-
-### Rate Limiting
-
-- **Global**: 200 req/día, 50 req/hora por IP
-- **Búsqueda**: 10 req/minuto por IP
-
-### Validación de Entrada
-
-- Sanitización automática de HTML/XSS
-- Límites de longitud
-- Validación de tipos
-
-### Autenticación Redis
-
-Configurar contraseña en `.env`:
-
-```bash
-REDIS_PASSWORD=your_strong_password
+**Response:**
+```json
+{
+  "plagiarism_detected": true,
+  "chunks_analyzed": 25,
+  "total_matches": 12,
+  "summary": {
+    "very_high": 2,
+    "high": 3,
+    "moderate": 5,
+    "low": 2,
+    "minimal": 0
+  },
+  "by_level": {
+    "very_high": {
+      "count": 2,
+      "results": [...]
+    }
+  }
+}
 ```
 
-### CORS
+### FAISS Management
 
-Configurar dominios permitidos:
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/faiss/stats` | GET | No | Get index statistics |
+| `/api/faiss/search` | POST | No | Direct FAISS search |
+| `/api/faiss/save` | POST | ✅ | Save index to disk |
+| `/api/faiss/clear` | POST | ✅ | Clear entire index |
+| `/api/faiss/backup` | POST | ✅ | Create backup |
+| `/api/faiss/remove-duplicates` | POST | ✅ | Remove duplicates |
+
+### Administration
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/reset-limits` | POST | ✅ | Reset rate limits |
+| `/api/cache/clear` | POST | ✅ | Clear Redis cache |
+| `/api/benchmark` | POST | No | Performance test |
+| `/api/deduplication/stats` | GET | No | Dedup statistics |
+
+### Monitoring
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Health check with metrics |
+| `/api/metrics` | GET | Prometheus format |
+| `/api/diagnostics/full` | GET | Complete diagnostics |
+| `/api/validate-apis` | POST | Test external APIs |
+| `/api/profiler/stats` | GET | Performance stats |
+| `/api/profiler/bottlenecks` | GET | Identify bottlenecks |
+
+---
+
+## 🔐 Security
+
+### Authentication
+
+Protected endpoints require `X-API-Key` header:
 
 ```bash
-ALLOWED_ORIGINS=https://domain1.com,https://domain2.com
+curl -X POST http://localhost:5000/api/faiss/clear \
+  -H "X-API-Key: your-admin-key-here"
 ```
 
-## 📈 Optimización
+### Configuration Checklist
 
-### Estrategias FAISS
+- [ ] **Set `ADMIN_API_KEY`** in `.env` (generate with `openssl rand -base64 48`)
+- [ ] **Set `FLASK_SECRET_KEY`** in `.env`
+- [ ] **Set `REDIS_PASSWORD`** for Redis authentication
+- [ ] **Configure `ALLOWED_ORIGINS`** with specific domains (no `*` in production)
+- [ ] **Enable HTTPS** via reverse proxy (Nginx/Traefik)
+- [ ] **Rotate API keys** periodically
 
-| Tamaño | Estrategia | Velocidad | Memoria | Recall |
-|--------|------------|-----------|---------|--------|
-| <10k | Flat | ⚡⚡⚡ | 🔴🔴🔴 | 100% |
-| 10k-100k | HNSW | ⚡⚡ | 🔴🔴 | 95% |
-| 100k-1M | IVF+Flat | ⚡ | 🔴 | 90% |
-| >1M | IVF+PQ | 🐌 | ✅ | 85% |
+### Rate Limits
 
-FAISS auto-upgrade automáticamente según el tamaño.
+- **Global**: 200 req/day, 50 req/hour per IP
+- **Search**: 10 req/minute
+- **Plagiarism Check**: 5 req/minute
+- **Benchmark**: 5 req/hour
 
-### Caché
+---
 
-- **Redis**: 24 horas de TTL
-- **Serialización**: orjson (5x más rápido que pickle)
-- **Compresión**: LRU con 512MB límite
+## 🛠️ Development
 
-### Performance
-
-- **HTTP/2**: Pool de 20 conexiones persistentes
-- **Batch processing**: 64 embeddings por batch
-- **Async/await**: Búsquedas paralelas en APIs
-
-## 🧪 Testing
+### Local Setup
 
 ```bash
-# Instalar dependencias de testing
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Download NLTK data
+python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords')"
+
+# Run development server
+FLASK_DEBUG=1 python app.py
+```
+
+### Running Tests
+
+```bash
+# Install test dependencies
 pip install pytest pytest-asyncio pytest-cov
 
-# Ejecutar tests
+# Run tests
 pytest
 
-# Con cobertura
+# With coverage
 pytest --cov=. --cov-report=html
 
-# Ver reporte
+# View coverage
 open htmlcov/index.html
 ```
 
-## 📊 Métricas
-
-### Prometheus
+### Code Quality
 
 ```bash
-# Scrape endpoint
-GET /api/metrics
+# Linting
+flake8 . --max-line-length=120
+
+# Type checking
+mypy . --ignore-missing-imports
+
+# Format code
+black .
 ```
 
-Métricas disponibles:
-- `api_requests_total`: Total de requests
-- `api_latency_ms`: Latencia promedio
-- `api_error_rate`: % de errores
-- `cache_hit_rate`: % de cache hits
-- `faiss_indexed_papers`: Papers en FAISS
+---
+
+## 🐳 Docker Deployment
+
+### Production Configuration
+
+```yaml
+# docker-compose.yml
+services:
+  app:
+    build: .
+    environment:
+      - FLASK_ENV=production
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - ALLOWED_ORIGINS=https://yourdomain.com
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+```
+
+### Scaling
+
+```bash
+# Scale with Docker Compose
+docker-compose up -d --scale app=3
+
+# Or use Kubernetes
+kubectl apply -f k8s/deployment.yaml
+kubectl scale deployment xplagiax --replicas=5
+```
+
+---
+
+## 📊 Monitoring
+
+### Prometheus + Grafana
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'xplagiax'
+    static_configs:
+      - targets: ['app:5000']
+    metrics_path: '/api/metrics'
+```
+
+**Key Metrics:**
+- `api_requests_total`: Total requests
+- `api_latency_ms`: Average latency
+- `api_error_rate`: Error percentage
+- `cache_hit_rate`: Cache efficiency
+- `faiss_indexed_papers`: Index size
 
 ### Grafana Dashboard
 
@@ -368,540 +445,152 @@ Métricas disponibles:
       "targets": ["rate(api_requests_total[5m])"]
     },
     {
-      "title": "FAISS Index Size",
-      "targets": ["faiss_indexed_papers"]
+      "title": "Latency P95",
+      "targets": ["histogram_quantile(0.95, api_latency_ms)"]
     }
   ]
 }
 ```
 
-## 🐛 Troubleshooting
+---
 
-### Error: FAISS no disponible
+## 🔧 Configuration
 
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ADMIN_API_KEY` | **Required** | API key for admin endpoints |
+| `FLASK_SECRET_KEY` | **Required** | Flask session secret |
+| `REDIS_PASSWORD` | - | Redis auth password |
+| `REDIS_HOST` | `localhost` | Redis hostname |
+| `REDIS_PORT` | `6379` | Redis port |
+| `ALLOWED_ORIGINS` | `localhost` | CORS allowed origins |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `CORE_API_KEY` | - | Optional: CORE search API key |
+
+### Model Configuration
+
+```python
+# config.py
+class Config:
+    EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+    SIMILARITY_THRESHOLD = 0.70  # 0.0-1.0
+    EMBEDDING_BATCH_SIZE = 32
+    MAX_RESULTS_PER_SOURCE = 5
+```
+
+---
+
+## 🚨 Troubleshooting
+
+### FAISS not available
 ```bash
-# Instalar FAISS
 pip install faiss-cpu
-
-# O para GPU
+# For GPU support:
 pip install faiss-gpu
 ```
 
-### Error: Redis connection refused
-
+### Redis connection refused
 ```bash
-# Verificar que Redis esté corriendo
-docker-compose ps
-
-# Ver logs
 docker-compose logs redis
-
-# Reiniciar servicios
-docker-compose restart
+docker-compose restart redis
 ```
 
-### Memoria insuficiente
-
+### High memory usage
 ```bash
-# Limpiar índice FAISS
-curl -X POST http://localhost:5000/api/faiss/clear
+# Clear FAISS index
+curl -X POST http://localhost:5000/api/faiss/clear \
+  -H "X-API-Key: your-key"
 
-# O reducir límites en docker-compose.yml
-deploy:
-  resources:
-    limits:
-      memory: 1G  # Reducir de 2G a 1G
+# Clear Redis cache
+curl -X POST http://localhost:5000/api/cache/clear \
+  -H "X-API-Key: your-key"
 ```
 
-### Índice corrupto
-
+### Slow searches
 ```bash
-# Auto-reparación
-curl -X POST http://localhost:5000/api/faiss/save
+# Check FAISS stats
+curl http://localhost:5000/api/faiss/stats
 
-# O limpiar y reconstruir
-curl -X POST http://localhost:5000/api/faiss/clear
+# Remove duplicates (speeds up index)
+curl -X POST http://localhost:5000/api/faiss/remove-duplicates \
+  -H "X-API-Key: your-key"
+
+# Check profiler
+curl http://localhost:5000/api/profiler/bottlenecks?top=5
 ```
 
-## 🔄 Backup y Recuperación
+---
 
-### Backup Manual
+## 📚 Documentation
 
-```bash
-# Backup FAISS
-curl -X POST http://localhost:5000/api/faiss/backup
-
-# Copiar datos
-docker cp academic_search_app:/app/backups ./backups_local
-```
-
-### Backup Automático (Cron)
-
-```bash
-# Agregar a crontab
-0 2 * * * docker exec academic_search_app curl -X POST http://localhost:5000/api/faiss/backup
-```
-
-### Restauración
-
-```bash
-# Copiar backup
-docker cp ./backups_local/faiss_20231215_020000/ academic_search_app:/app/data/
-
-# Renombrar archivos
-docker exec academic_search_app mv data/faiss_20231215_020000/faiss_index.index data/faiss_index.index
-
-# Reiniciar
-docker-compose restart app
-```
-
-## 📝 Logs
-
-### Ver Logs
-
-```bash
-# Tiempo real
-docker-compose logs -f app
-
-# Últimas 100 líneas
-docker-compose logs --tail=100 app
-
-# Logs de archivo
-docker exec academic_search_app tail -f logs/app_$(date +%Y%m%d).log
-```
-
-### Niveles de Log
-
-Configurar en `.env`:
-
-```bash
-LOG_LEVEL=DEBUG  # DEBUG, INFO, WARNING, ERROR, CRITICAL
-```
-
-## 🚀 Producción
-
-### Checklist
-
-- [ ] Cambiar `REDIS_PASSWORD` y `FLASK_SECRET_KEY`
-- [ ] Configurar `ALLOWED_ORIGINS` con dominios reales
-- [ ] Establecer `LOG_LEVEL=WARNING`
-- [ ] Configurar backup automático
-- [ ] Configurar monitoreo (Prometheus + Grafana)
-- [ ] Habilitar HTTPS en reverse proxy
-- [ ] Limitar recursos en docker-compose
-- [ ] Configurar alertas
-
-### Reverse Proxy (Nginx)
-
-```nginx
-server {
-    listen 80;
-    server_name api.yourdomain.com;
-
-    location / {
-        proxy_pass http://localhost:5000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-}
-```
-
-### Escalado
-
-```bash
-# Aumentar workers de Gunicorn
-# En Dockerfile, cambiar:
-CMD ["gunicorn", "--workers", "8", ...]  # De 4 a 8
-
-# Escalar con Docker Compose
-docker-compose up -d --scale app=3
-```
-
-## 📚 Documentación Adicional
-
-- [FAISS Usage Guide](FAISS_USAGE.md)
+- [Architecture Details](docs/ARCHITECTURE.md)
 - [API Reference](docs/API.md)
-- [Architecture](docs/ARCHITECTURE.md)
+- [FAISS Usage Guide](FAISS_USAGE.md)
+- [Contributing Guide](docs/CONTRIBUTING.md)
 
-## 🤝 Contribución
+---
 
-1. Fork el proyecto
-2. Crear branch (`git checkout -b feature/AmazingFeature`)
-3. Commit cambios (`git commit -m 'Add AmazingFeature'`)
-4. Push al branch (`git push origin feature/AmazingFeature`)
-5. Abrir Pull Request
+## 🗺️ Roadmap
 
-## 📄 Licencia
+### v2.1 (Current - Refactored)
+- ✅ Blueprints architecture
+- ✅ API key authentication
+- ✅ Secure CORS configuration
+- ✅ Improved error handling
 
-Este proyecto está bajo la licencia MIT.
+### v2.2 (Planned)
+- [ ] Complete test suite (80% coverage)
+- [ ] OpenAPI/Swagger documentation
+- [ ] Redis cluster support
+- [ ] Celery background jobs
 
-## 👥 Autores
+### v3.0 (Future)
+- [ ] Migrate to Quart (native async)
+- [ ] PostgreSQL for metadata
+- [ ] Qdrant for vector search
+- [ ] Kubernetes deployment templates
 
-- **Equipo xplagiax** - Desarrollo inicial
+---
 
-## 🙏 Agradecimientos
+## 🤝 Contributing
 
-- Sentence Transformers
-- FAISS (Facebook AI)
-- Flask
-- Todas las APIs académicas utilizadas
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit changes (`git commit -m 'Add AmazingFeature'`)
+4. Push to branch (`git push origin feature/AmazingFeature`)
+5. Open Pull Request
 
-  ┌─────────────────────────────────────────────────────────────────┐
-│ USUARIO ENVÍA REQUEST                                           │
-│ POST /api/similarity-search                                     │
-│ {                                                               │
-│   "data": [                                                     │
-│     "machine learning",                                         │
-│     "en",                                                       │
-│     [                                                           │
-│       ["page1", "para1", "Neural networks are models"],        │
-│       ["page1", "para2", "Deep learning uses layers"]          │
-│     ]                                                           │
-│   ]                                                             │
-│ }                                                               │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 1: Flask recibe el request                                │
-│ Archivo: app.py línea 43                                       │
-│ Función: @app.route('/api/similarity-search')                  │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 2: Validación de datos                                    │
-│ Archivo: app.py líneas 51-77                                   │
-│                                                                 │
-│ ✓ Verifica que exista campo 'data'                            │
-│ ✓ Extrae: theme = "machine learning"                          │
-│ ✓ Extrae: idiom = "en"                                        │
-│ ✓ Extrae: texts = [[page, para, text], ...]                  │
-│ ✓ Extrae: sources = None (opcional)                           │
-│ ✓ Extrae: use_faiss = True (default)                          │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 3: Llama al procesador principal                          │
-│ Archivo: app.py línea 80                                       │
-│                                                                 │
-│ process_similarity_batch(                                       │
-│   texts,              # Los párrafos a buscar                  │
-│   theme,              # "machine learning"                     │
-│   idiom,              # "en"                                   │
-│   redis_client,       # Para caché                             │
-│   http_client,        # Para APIs                              │
-│   rate_limiter,       # Control de rate limits                 │
-│   sources,            # APIs a usar                            │
-│   use_faiss           # Si usar FAISS o no                     │
-│ )                                                               │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 4: Inicio del procesamiento batch                         │
-│ Archivo: search_service.py línea 49                            │
-│ Función: process_similarity_batch()                            │
-│                                                                 │
-│ • Inicia timer para métricas                                   │
-│ • Verifica salud del índice FAISS                             │
-│ • Agrupa textos únicos (deduplicación)                        │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 5: Preprocesamiento de textos                            │
-│ Archivo: search_service.py líneas 61-80                       │
-│                                                                 │
-│ Para cada texto:                                               │
-│   1. preprocess_text_cached()                                  │
-│      • Convierte a minúsculas                                  │
-│      • Elimina caracteres especiales                           │
-│      • Normaliza espacios                                      │
-│                                                                 │
-│   Entrada: "Neural networks are computational Models!"         │
-│   Salida: "neural networks are computational models"           │
-│                                                                 │
-│   2. remove_stopwords_optimized()                              │
-│      • Tokeniza el texto                                       │
-│      • Elimina palabras comunes (are, the, is...)             │
-│                                                                 │
-│   Entrada: "neural networks are computational models"          │
-│   Salida: "neural networks computational models"               │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 6: Verificar caché Redis                                  │
-│ Archivo: search_service.py línea 70                            │
-│                                                                 │
-│ • Genera clave única: hash(theme + idiom + texto)             │
-│ • Busca en Redis: "search:abc123..."                          │
-│                                                                 │
-│ SI ENCUENTRA en caché:                                         │
-│   → Retorna resultados inmediatamente ✅                       │
-│   → Salta al PASO 14                                           │
-│                                                                 │
-│ SI NO ENCUENTRA:                                               │
-│   → Continúa al PASO 7 ⏬                                       │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 7: Búsqueda en FAISS (si disponible)                     │
-│ Archivo: search_service.py líneas 85-100                      │
-│                                                                 │
-│ SI FAISS tiene papers indexados:                               │
-│   1. Llama a faiss_index.search_batch()                       │
-│      • Genera embeddings de las queries                        │
-│      • Busca vectores similares en el índice                   │
-│      • Retorna top 20 por query                                │
-│                                                                 │
-│   Ejemplo:                                                      │
-│   Query: "neural networks computational models"                │
-│   ↓                                                             │
-│   Embedding: [0.12, -0.45, 0.78, ..., 0.34] (384 dims)       │
-│   ↓                                                             │
-│   FAISS busca vectores similares                               │
-│   ↓                                                             │
-│   Encuentra:                                                    │
-│     - "Deep Learning Book" (89.2% match)                       │
-│     - "Neural Network Basics" (85.7% match)                    │
-│     - "CNN Tutorial" (82.1% match)                             │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 8: Evaluar resultados de FAISS                           │
-│ Archivo: search_service.py líneas 102-122                     │
-│                                                                 │
-│ Para cada query:                                               │
-│   SI encontró ≥5 resultados en FAISS:                         │
-│     → Convierte a SearchResult                                 │
-│     → Guarda en caché                                          │
-│     → Marca como "completo" ✅                                 │
-│                                                                 │
-│   SI encontró <5 resultados:                                   │
-│     → Marca para buscar en APIs 🌐                            │
-│     → Continúa al PASO 9 ⏬                                    │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 9: Búsqueda en APIs externas (si es necesario)             │
-│ Archivo: search_service.py línea 127                            │
-│ Función: search_all_sources()                                   │
-│                                                                 │
-│ Busca en PARALELO en todas las APIs:                            │
-│   • Crossref                                                    │
-│   • PubMed                                                      │
-│   • Semantic Scholar                                            │
-│   • arXiv                                                       │
-│   • OpenAlex                                                    │
-│   • Europe PMC                                                  │
-│   • DOAJ                                                        │
-│   • Zenodo                                                      │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 10: Detalle de búsqueda en UNA API (ej: Semantic Scholar)  │
-│ Archivo: searchers.py línea 112                                 │
-│ Función: search_semantic_scholar()                              │
-│                                                                 │
-│ 1. Verifica rate limit (100 req/min)                            │
-│    SI excede límite → Retorna [] vacío                          │
-│                                                                 │
-│ 2. Construye request HTTP:                                      │
-│    GET https://api.semanticscholar.org/graph/v1/paper/search    │
-│    params: {                                                    │
-│      query: "machine learning neural networks models",          │
-│      limit: 5,                                                  │
-│      fields: "title,abstract,authors,publicationTypes"          │
-│    }                                                            │
-│                                                                 │
-│ 3. Espera respuesta (timeout 8s)                                │
-│                                                                 │
-│ 4. Parsea JSON:                                                 │
-│    {                                                            │
-│      "data": [                                                  │
-│        {                                                        │
-│          "title": "Deep Learning",                              │
-│          "abstract": "This paper presents...",                  │
-│          "authors": [{"name": "Goodfellow"}],                   │
-│          "publicationTypes": ["JournalArticle"]                 │
-│        },                                                       │
-│        ...                                                      │
-│      ]                                                          │
-│    }                                                            │
-│                                                                 │
-│ 5. Retorna lista de papers:                                     │
-│    [                                                            │
-│      {                                                          │
-│        "title": "Deep Learning",                                │
-│        "abstract": "This paper presents...",                    │
-│        "author": "Goodfellow",                                  │
-│        "type": "JournalArticle"                                 │
-│      }                                                          │
-│    ]                                                            │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 11: Agregar papers nuevos a FAISS                        │
-│ Archivo: search_service.py líneas 133-148                     │
-│                                                                 │
-│ Para cada paper encontrado en APIs:                            │
-│   1. Extrae abstract                                           │
-│   2. Genera metadata:                                          │
-│      {                                                          │
-│        "title": "Deep Learning",                               │
-│        "author": "Goodfellow",                                 │
-│        "abstract": "This paper...",                            │
-│        "source": "semantic_scholar",                           │
-│        "type": "JournalArticle"                                │
-│      }                                                          │
-│                                                                 │
-│   3. Llama a faiss_index.add_papers()                         │
-│      • Genera embeddings de abstracts                          │
-│      • Los normaliza (L2)                                      │
-│      • Los agrega al índice FAISS                             │
-│      • Guarda metadata asociada                                │
-│                                                                 │
-│ RESULTADO: Papers quedan guardados para futuras búsquedas 💾  │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 12: Calcular similitud con embeddings                    │
-│ Archivo: search_service.py línea 151                          │
-│ Función: calculate_similarities_batch()                        │
-│                                                                 │
-│ 1. Preprocesa abstracts de papers encontrados                 │
-│    Abstract: "This paper presents deep learning methods..."    │
-│    →                                                            │
-│    Procesado: "paper presents deep learning methods"           │
-│                                                                 │
-│ 2. Genera embeddings en BATCH (rápido):                       │
-│    Query: [0.12, -0.45, 0.78, ..., 0.34]                     │
-│    Papers: [                                                   │
-│      [0.15, -0.42, 0.81, ..., 0.31],  ← Paper 1              │
-│      [0.08, -0.52, 0.65, ..., 0.29],  ← Paper 2              │
-│      [-0.20, 0.15, -0.10, ..., 0.45]  ← Paper 3              │
-│    ]                                                            │
-│                                                                 │
-│ 3. Calcula similitud coseno (NumPy vectorizado):              │
-│    similarities = cosine_similarity(query, papers)             │
-│    → [0.892, 0.857, 0.234]  # Paper 1=89%, Paper 2=85%, ...  │
-│                                                                 │
-│ 4. Filtra por threshold (70%):                                │
-│    Papers con similitud ≥70%:                                 │
-│      ✅ Paper 1: 89.2%                                         │
-│      ✅ Paper 2: 85.7%                                         │
-│      ❌ Paper 3: 23.4% (descartado)                           │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 13: Construir objetos SearchResult                       │
-│ Archivo: search_service.py líneas 153-168                     │
-│                                                                 │
-│ Para cada paper con similitud ≥70%:                           │
-│   SearchResult(                                                │
-│     fuente = "semantic_scholar",                               │
-│     texto_original = "Neural networks are models",             │
-│     texto_encontrado = "This paper presents deep...",          │
-│     porcentaje_match = 89.2,                                   │
-│     documento_coincidente = "Deep Learning Book",              │
-│     autor = "Goodfellow",                                      │
-│     type_document = "JournalArticle"                           │
-│   )                                                             │
-│                                                                 │
-│ • Ordena por similitud (descendente)                          │
-│ • Toma top 10 por query                                       │
-│ • Guarda en caché Redis                                       │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 14: Guardar índice FAISS actualizado                     │
-│ Archivo: search_service.py línea 175                          │
-│                                                                 │
-│ • Llama a faiss_index.save()                                   │
-│ • Guarda índice en: data/faiss_index.index                    │
-│ • Guarda metadata en: data/faiss_index_metadata.pkl           │
-│                                                                 │
-│ AHORA los nuevos papers están disponibles para próximas       │
-│ búsquedas sin necesidad de llamar APIs otra vez 🚀            │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 15: Calcular métricas de performance                     │
-│ Archivo: search_service.py líneas 179-183                     │
-│                                                                 │
-│ elapsed = tiempo_final - tiempo_inicial                        │
-│ throughput = textos_procesados / elapsed                       │
-│                                                                 │
-│ Imprime:                                                         │
-│   ⚡ Procesamiento completado en 2.34s                          │
-│   📈 Throughput: 4.3 textos/s                                   │
-│   💾 FAISS: 1523 papers indexados                               │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 16: Retornar al endpoint Flask                             │
-│ Archivo: search_service.py línea 185                            │
-│                                                                 │
-│ Retorna lista de SearchResult:                                  │
-│   [                                                             │
-│     SearchResult(fuente="semantic_scholar", ...),               │
-│     SearchResult(fuente="arxiv", ...),                          │
-│     SearchResult(fuente="pubmed", ...)                          │
-│   ]                                                             │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 17: Flask convierte a JSON                                 │
-│ Archivo: app.py líneas 89-96                                    │
-│                                                                 │
-│ response = [asdict(r) for r in results]                         │
-│                                                                 │
-│ Convierte SearchResult → Dict:                                  │
-│   {                                                             │
-│     "fuente": "semantic_scholar",                               │
-│     "texto_original": "Neural networks are models",             │
-│     "texto_encontrado": "This paper presents...",               │
-│     "porcentaje_match": 89.2,                                   │
-│     "documento_coincidente": "Deep Learning Book",              │
-│     "autor": "Goodfellow",                                      │
-│     "type_document": "JournalArticle"                           │
-│   }                                                             │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ PASO 18: Enviar respuesta HTTP                                  │
-│ Archivo: app.py líneas 98-102                                   │
-│                                                                 │
-│ return jsonify({                                                │
-│   "results": [                                                  │
-│     {                                                           │
-│       "fuente": "semantic_scholar",                             │
-│       "texto_original": "Neural networks are models",           │
-│       "texto_encontrado": "This paper presents deep...",        │
-│       "porcentaje_match": 89.2,                                 │
-│       "documento_coincidente": "Deep Learning Book",            │
-│       "autor": "Goodfellow",                                    │
-│       "type_document": "JournalArticle"                         │
-│     },                                                          │
-│     {                                                           │
-│       "fuente": "arxiv",                                        │
-│       "texto_original": "Deep learning uses layers",            │
-│       "texto_encontrado": "We propose a novel...",              │
-│       "porcentaje_match": 85.7,                                 │
-│       "documento_coincidente": "CNN Architecture",              │
-│       "autor": "LeCun",                                         │
-│       "type_document": "preprint"                               │
-│     }                                                           │
-│   ],                                                            │
-│   "count": 2,                                                   │
-│   "processed_texts": 2,                                         │
-│   "faiss_enabled": true                                         │
-│ }), 200                                                         │
-│                                                                 │
-│ Status: 200 OK                                                  │
-│ Content-Type: application/json                                  │
-└─────────────────────────────────────────────────────────────────┘
-                              ↓
-┌─────────────────────────────────────────────────────────────────┐
-│ USUARIO RECIBE RESPUESTA                                        │
-│                                                                 │
-│ JSON con papers similares encontrados ✅                        │
-└─────────────────────────────────────────────────────────────────┘
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see [LICENSE](LICENSE) file.
+
+---
+
+## 👥 Authors
+
+- **xplagiax Team** - *Initial work*
+
+---
+
+## 🙏 Acknowledgments
+
+- [Sentence Transformers](https://www.sbert.net/)
+- [FAISS](https://github.com/facebookresearch/faiss) by Facebook AI
+- [Flask](https://flask.palletsprojects.com/)
+- All academic API providers
+
+---
+
+## 📞 Support
+
+- **Email**: support@xplagiax.com
+- **Documentation**: https://docs.xplagiax.com
+- **Issues**: https://github.com/xplagiax/sourcex/issues
+
+---
+
+**Built with ❤️ for academic integrity**
