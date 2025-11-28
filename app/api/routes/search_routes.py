@@ -1,6 +1,7 @@
 """
 Search Routes - Similarity search and plagiarism check endpoints
 """
+from functools import wraps
 from flask import Blueprint
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -11,17 +12,28 @@ from app.api.controllers.search_controller import search_controller
 search_bp = Blueprint('search', __name__, url_prefix='/api')
 
 # Rate limiter (will be initialized from app.py)
-limiter = None
+_limiter = None
 
 
 def init_search_routes(app_limiter: Limiter):
     """Initialize rate limiter for search routes"""
-    global limiter
-    limiter = app_limiter
+    global _limiter 
+    _limiter = app_limiter
 
+def rate_limit(limit_string):
+    """Lazy rate limit decorator"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if _limiter is None:
+                raise RuntimeError("Limiter not initialized. Call init_search_routes() first.")
+            # Aplicar rate limiting dinámicamente
+            return _limiter.limit(limit_string)(f)(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 @search_bp.route('/similarity-search', methods=['POST'])
-@limiter.limit("10 per minute")
+@rate_limit.limit("10 per minute")
 def similarity_search():
     """
     POST /api/similarity-search
@@ -48,7 +60,7 @@ def similarity_search():
 
 
 @search_bp.route('/plagiarism-check', methods=['POST'])
-@limiter.limit("5 per minute")
+@rate_limit.limit("5 per minute")
 def plagiarism_check():
     """
     POST /api/plagiarism-check
