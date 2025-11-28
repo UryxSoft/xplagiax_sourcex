@@ -30,6 +30,7 @@ def create_app(config_name=None):
         config_name = os.getenv('FLASK_ENV', 'development')
     
     from configs import get_config
+    from app.core.config import Config
     config_class = get_config(config_name)
     app.config.from_object(config_class)
     
@@ -40,12 +41,21 @@ def create_app(config_name=None):
     limiter = Limiter(
         app=app,
         key_func=get_remote_address,
-        storage_uri=app.config.get('RATE_LIMIT_STORAGE_URL', 'memory://')
+        storage_uri=app.config.get('REDIS_URL', 'memory://')
     )
-    
+    # Luego importar blueprints (que ya tienen decoradores)
+    from app.api.routes import search_bp, faiss_bp, admin_bp, diagnostics_bp
+
+    # Por último registrar
+    app.register_blueprint(search_bp)
+    app.register_blueprint(faiss_bp)
+    app.register_blueprint(admin_bp)
+    app.register_blueprint(diagnostics_bp)
+
     # CORS
-    CORS(app, origins=app.config.get('CORS_ORIGINS', ['*']))
-    
+    #CORS(app, origins=app.config.get('CORS_ORIGINS', ['*']))
+    CORS(app, resources={r"/api/*": {"origins": app.config.get('CORS_ORIGINS', ['*'])}})
+
     # 3. Initialize Flask extensions (Redis, HTTP, FAISS)
     with app.app_context():
         from app.core.extensions import init_extensions
