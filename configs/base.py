@@ -3,7 +3,7 @@ Base Configuration - Shared settings across all environments
 """
 import os
 from datetime import timedelta
-
+from typing import Any
 
 class BaseConfig:
     """
@@ -150,3 +150,49 @@ class BaseConfig:
         os.makedirs(cls.DATA_DIR, exist_ok=True)
         os.makedirs(cls.LOGS_DIR, exist_ok=True)
         os.makedirs(cls.BACKUPS_DIR, exist_ok=True)
+
+
+    # JSON optimization
+    JSON_SORT_KEYS = False
+    JSONIFY_PRETTYPRINT_REGULAR = False
+    JSONIFY_MIMETYPE = 'application/json'
+    
+    @classmethod
+    def init_app(cls, app):
+        """Initialize application with config"""
+        # Create directories
+        import os
+        os.makedirs(cls.DATA_DIR, exist_ok=True)
+        os.makedirs(cls.LOGS_DIR, exist_ok=True)
+        os.makedirs(cls.BACKUPS_DIR, exist_ok=True)
+        
+        # ✅ NUEVO: Configurar orjson como JSON provider
+        cls._setup_json_provider(app)
+    
+    @staticmethod
+    def _setup_json_provider(app):
+        """Setup orjson as JSON provider"""
+        try:
+            from flask.json.provider import DefaultJSONProvider
+            import orjson
+            
+            class OrjsonProvider(DefaultJSONProvider):
+                """Ultra-fast JSON provider using orjson"""
+                
+                def dumps(self, obj, **kwargs):
+                    # orjson.dumps retorna bytes
+                    return orjson.dumps(
+                        obj,
+                        option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY
+                    ).decode('utf-8')
+                
+                def loads(self, s, **kwargs):
+                    if isinstance(s, bytes):
+                        return orjson.loads(s)
+                    return orjson.loads(s.encode('utf-8'))
+            
+            app.json = OrjsonProvider(app)
+            logger.info("✅ orjson JSON provider configured")
+        
+        except ImportError:
+            logger.warning("⚠️ orjson not available, using default JSON provider")

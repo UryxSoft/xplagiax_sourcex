@@ -10,6 +10,8 @@ from app.api.schemas.search_schema import SimilaritySearchSchema, PlagiarismChec
 from app.core.errors import ValidationError as APIValidationError
 from app.services.similarity_service import SimilarityService
 from app.utils.asyncio_compat import run_async
+from app.utils.cache import CacheManager
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -21,14 +23,14 @@ class SearchController:
         self.similarity_service = SimilarityService()
         self.search_schema = SimilaritySearchSchema()
         self.plagiarism_schema = PlagiarismCheckSchema()
+        self.cache_manager = CacheManager()
     
     def similarity_search(self):
         """
-        Handle POST /api/similarity-search
-        
-        Returns:
-            JSON response with search results
+        Handle POST /api/similarity-search (OPTIMIZADO)
         """
+        start_time = time.perf_counter()  # ✅ Más preciso que time.time()
+        
         try:
             # 1. Validate request data
             data = request.get_json()
@@ -36,9 +38,9 @@ class SearchController:
             if not data:
                 raise APIValidationError("Request body is required")
             
-            # Parse and validate using Marshmallow
+            # Parse and validate
             try:
-                # Convert legacy format to schema format
+                # Convert legacy format
                 legacy_data = data.get('data', [])
                 if len(legacy_data) >= 3:
                     validated_data = {
@@ -57,9 +59,34 @@ class SearchController:
             except ValidationError as e:
                 raise APIValidationError(str(e.messages))
             
-            # 2. Execute search service
+            # ✅ 2. Check cache ANTES de procesar
+            cache_key = self.cache_manager.generate_key(
+                theme=validated['theme'],
+                text=str(validated['texts']),  # Simple hash de todos los textos
+                threshold=validated['threshold'],
+                sources=validated['sources'] or []
+            )
+            
+            # Intentar obtener del cache
+            cached_results = run_async(
+                self.cache_manager.get_from_cache(cache_key)
+            )
+            
+            if cached_results:
+                logger.info("Cache HIT - returning cached results")
+                return jsonify({
+                    "results": cached_results,
+                    "count": len(cached_results),
+                    "processed_texts": len(validated['texts']),
+                    "threshold_used": validated['threshold'],
+                    "faiss_enabled": validated['use_faiss'],
+                    "cached": True,  # ✅ Indicar que es cached
+                    "response_time_ms": round((time.perf_counter() - start_time) * 1000, 2)
+                }), 200
+            
+            # 3. Execute search service
             logger.info(
-                "Similarity search started",
+                "Cache MISS - processing search",
                 extra={
                     "theme": validated['theme'],
                     "idiom": validated['idiom'],
@@ -79,24 +106,35 @@ class SearchController:
                 )
             )
             
-            # 3. Format response
-            response_data = {
-                "results": [asdict(r) for r in results],
-                "count": len(results),
-                "processed_texts": len(validated['texts']),
-                "threshold_used": validated['threshold'],
-                "faiss_enabled": validated['use_faiss']
-            }
+            # 4. Convert to dict format
+            response_data = [asdict(r) for r in results]
+            
+            # ✅ 5. Save to cache (async, no esperar)
+            if response_data:
+                run_async(
+                    self.cache_manager.save_to_cache(cache_key, response_data)
+                )
+            
+            elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
             
             logger.info(
-                "Similarity search completed",
+                "Search completed",
                 extra={
-                    "num_results": len(results),
-                    "threshold": validated['threshold']
+                    "num_results": len(response_data),
+                    "threshold": validated['threshold'],
+                    "elapsed_ms": elapsed_ms
                 }
             )
             
-            return jsonify(response_data), 200
+            return jsonify({
+                "results": response_data,
+                "count": len(response_data),
+                "processed_texts": len(validated['texts']),
+                "threshold_used": validated['threshold'],
+                "faiss_enabled": validated['use_faiss'],
+                "cached": False,
+                "response_time_ms": elapsed_ms
+            }), 200
         
         except APIValidationError as e:
             return jsonify({

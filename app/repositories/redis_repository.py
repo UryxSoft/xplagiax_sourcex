@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any, Optional, List, Dict
 import redis.asyncio as aioredis
+from app.utils.serialization import dumps_json, loads_json
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class RedisRepository:
                 return None
             
             # Deserialize JSON
-            return json.loads(value)
+            return loads_json(value)
         
         except json.JSONDecodeError as e:
             logger.error(f"JSON decode error for key '{key}': {e}")
@@ -81,7 +82,7 @@ class RedisRepository:
         """
         try:
             # Serialize to JSON
-            json_value = json.dumps(value)
+            son_value = dumps_json(value)
             
             # Use default TTL if not specified
             if ttl is None:
@@ -239,7 +240,7 @@ class RedisRepository:
             
             for key, value in items.items():
                 try:
-                    json_value = json.dumps(value)
+                    son_value = dumps_json(value)
                     pipeline.setex(key, ttl, json_value)
                 except (TypeError, ValueError) as e:
                     logger.warning(f"Skipping key '{key}': {e}")
@@ -360,7 +361,7 @@ class RedisRepository:
             if value is None:
                 return None
             
-            return json.loads(value)
+            return loads_json(value)
         
         except Exception as e:
             logger.error(f"Error getting hash key '{name}:{key}': {e}")
@@ -379,7 +380,7 @@ class RedisRepository:
             True if successful
         """
         try:
-            json_value = json.dumps(value)
+            son_value = dumps_json(value)
             result = await self.client.hset(name, key, json_value)
             return result >= 0
         

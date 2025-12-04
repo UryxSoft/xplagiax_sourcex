@@ -1,26 +1,21 @@
 """
-Cache Manager - Redis caching utilities
+Cache Manager - Ultra-optimizado con orjson/msgpack
 """
-import json
 import hashlib
 import logging
 from typing import Any, Optional, List
 from app.core.extensions import get_redis_client
+from app.utils.serialization import dumps_json, loads_json
 
 logger = logging.getLogger(__name__)
 
 
 class CacheManager:
-    """Manage Redis caching for search results"""
+    """Manager de caché ultra-optimizado"""
     
     def __init__(self, ttl: int = 3600):
-        """
-        Initialize cache manager
-        
-        Args:
-            ttl: Time to live in seconds (default: 1 hour)
-        """
         self.ttl = ttl
+        self.default_prefix = "xplagiax"
     
     def generate_key(
         self,
@@ -30,107 +25,69 @@ class CacheManager:
         sources: List[str]
     ) -> str:
         """
-        Generate cache key from search parameters
-        
-        Args:
-            theme: Search theme
-            text: Processed text
-            threshold: Similarity threshold
-            sources: List of sources
-        
-        Returns:
-            Cache key string
-        
-        Examples:
-            >>> cache = CacheManager()
-            >>> key = cache.generate_key("AI", "machine learning", 0.7, ["pubmed"])
-            >>> print(key)
-            'search:abc123def456'
+        Genera cache key usando blake2b (más rápido que sha256)
         """
-        # Create unique key from parameters
-        key_data = f"{theme}:{text}:{threshold}:{','.join(sorted(sources))}"
+        # Normalizar sources
+        sources_str = ','.join(sorted(sources)) if sources else 'all'
         
-        # Hash for consistent length
-        key_hash = hashlib.sha256(key_data.encode()).hexdigest()[:16]
+        # Crear string único
+        key_data = f"{theme}:{text}:{threshold}:{sources_str}"
         
-        return f"search:{key_hash}"
+        # Hash con blake2b (2x más rápido que sha256)
+        key_hash = hashlib.blake2b(
+            key_data.encode('utf-8'),
+            digest_size=16
+        ).hexdigest()
+        
+        return f"{self.default_prefix}:search:{key_hash}"
     
     async def get_from_cache(self, key: str) -> Optional[Any]:
         """
-        Get value from cache
-        
-        Args:
-            key: Cache key
-        
-        Returns:
-            Cached value or None if not found
+        Obtiene del caché usando orjson (5x más rápido)
         """
         redis_client = get_redis_client()
         
         if not redis_client:
-            logger.debug("Redis client not available")
             return None
         
         try:
-            value = await redis_client.get(key)
+            cached = await redis_client.get(key)
             
-            if value:
-                logger.debug(f"Cache HIT: {key}")
-                return json.loads(value)
+            if cached:
+                # Deserializar con orjson
+                return loads_json(cached)
             
-            logger.debug(f"Cache MISS: {key}")
-            return None
-        
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error for key '{key}': {e}")
             return None
         
         except Exception as e:
-            logger.error(f"Cache get error for key '{key}': {e}")
+            logger.error(f"Cache read error for key '{key[:30]}...': {e}")
             return None
     
     async def save_to_cache(self, key: str, value: Any) -> bool:
         """
-        Save value to cache
-        
-        Args:
-            key: Cache key
-            value: Value to cache (must be JSON-serializable)
-        
-        Returns:
-            True if successful, False otherwise
+        Guarda en caché usando orjson (ultrarrápido)
         """
         redis_client = get_redis_client()
         
         if not redis_client:
-            logger.debug("Redis client not available")
             return False
         
         try:
-            json_value = json.dumps(value)
-            await redis_client.setex(key, self.ttl, json_value)
+            # Serializar con orjson
+            serialized = dumps_json(value)
             
-            logger.debug(f"Cache SAVE: {key} (ttl={self.ttl}s)")
+            # Guardar con TTL
+            await redis_client.setex(key, self.ttl, serialized)
+            
+            logger.debug(f"Cache saved: {key[:30]}... (ttl={self.ttl}s)")
             return True
         
-        except (TypeError, ValueError) as e:
-            logger.error(f"Serialization error for key '{key}': {e}")
-            return False
-        
         except Exception as e:
-            logger.error(f"Cache save error for key '{key}': {e}")
+            logger.error(f"Cache save error for key '{key[:30]}...': {e}")
             return False
     
     async def delete_from_cache(self, key: str) -> bool:
-        """
-        Delete key from cache
-        
-        Args:
-            key: Cache key
-        
-        Returns:
-            True if key was deleted
-        """
+        """Elimina key del caché"""
         redis_client = get_redis_client()
         
         if not redis_client:
@@ -140,22 +97,80 @@ class CacheManager:
             result = await redis_client.delete(key)
             
             if result > 0:
-                logger.debug(f"Cache DELETE: {key}")
+                logger.debug(f"Cache deleted: {key[:30]}...")
                 return True
             
             return False
         
         except Exception as e:
-            logger.error(f"Cache delete error for key '{key}': {e}")
+            logger.error(f"Cache delete error: {e}")
             return False
     
-    async def clear_all(self) -> bool:
+    async def get_many(self, keys: List[str]) -> dict:
         """
-        Clear entire cache (DESTRUCTIVE)
+        Obtiene múltiples keys (pipeline para eficiencia)
+        """
+        redis_client = get_redis_client()
         
-        Returns:
-            True if successful
+        if not redis_client or not keys:
+            return {}
+        
+        try:
+            # Usar pipeline
+            pipe = redis_client.pipeline()
+            for key in keys:
+                pipe.get(key)
+            
+            values = await pipe.execute()
+            
+            # Deserializar
+            result = {}
+            for key, value in zip(keys, values):
+                if value:
+                    try:
+                        result[key] = loads_json(value)
+                    except Exception:
+                        pass
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"Cache get_many error: {e}")
+            return {}
+    
+    async def set_many(self, items: dict, ttl: Optional[int] = None) -> int:
         """
+        Guarda múltiples items (pipeline)
+        """
+        redis_client = get_redis_client()
+        
+        if not redis_client or not items:
+            return 0
+        
+        ttl = ttl or self.ttl
+        
+        try:
+            pipe = redis_client.pipeline()
+            
+            for key, value in items.items():
+                try:
+                    serialized = dumps_json(value)
+                    pipe.setex(key, ttl, serialized)
+                except Exception as e:
+                    logger.warning(f"Skipping key {key[:30]}...: {e}")
+            
+            results = await pipe.execute()
+            success_count = sum(1 for r in results if r)
+            
+            logger.debug(f"Cache set_many: {success_count}/{len(items)} saved")
+            return success_count
+        
+        except Exception as e:
+            logger.error(f"Cache set_many error: {e}")
+            return 0
+    
+    async def clear_all(self) -> bool:
+        """Limpia todo el caché (DESTRUCTIVO)"""
         redis_client = get_redis_client()
         
         if not redis_client:
@@ -163,7 +178,7 @@ class CacheManager:
         
         try:
             await redis_client.flushdb()
-            logger.warning("Cache cleared (all keys deleted)")
+            logger.warning("⚠️ Cache cleared (all keys deleted)")
             return True
         
         except Exception as e:
@@ -171,12 +186,7 @@ class CacheManager:
             return False
     
     async def get_stats(self) -> dict:
-        """
-        Get cache statistics
-        
-        Returns:
-            Dict with cache stats
-        """
+        """Estadísticas del caché"""
         redis_client = get_redis_client()
         
         if not redis_client:
@@ -199,5 +209,5 @@ class CacheManager:
             }
         
         except Exception as e:
-            logger.error(f"Error getting cache stats: {e}")
+            logger.error(f"Cache stats error: {e}")
             return {'status': 'error', 'error': str(e)}

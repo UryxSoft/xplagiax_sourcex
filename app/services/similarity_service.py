@@ -487,3 +487,99 @@ class SimilarityService:
         logger.info(f"Batch search completed: {len(final_results)} results")
         
         return final_results
+
+    # Agregar al final de SimilarityService
+
+    async def search_similarity_streaming(
+        self,
+        theme: str,
+        idiom: str,
+        texts: List[Tuple[str, str, str]],
+        threshold: float = 0.70,
+        use_faiss: bool = True,
+        sources: Optional[List[str]] = None
+    ):
+        """
+        Search similarity usando generator (menos memoria)
+        
+        Yields results text by text en vez de acumular todo
+        """
+        logger.info(
+            f"Starting streaming search: theme='{theme}', texts={len(texts)}"
+        )
+        
+        deduplicator = await get_deduplicator()
+        
+        for idx, (page, paragraph, text) in enumerate(texts):
+            logger.debug(f"Processing text {idx + 1}/{len(texts)}")
+            
+            # Preprocess
+            processed_text = self.preprocessor.preprocess(text, idiom)
+            
+            if len(processed_text.strip()) < 10:
+                logger.warning(f"Text {idx} too short, skipping")
+                continue
+            
+            # Check cache
+            cache_key = self.cache.generate_key(
+                theme, processed_text, threshold, sources or []
+            )
+            
+            cached_results = await self.cache.get_from_cache(cache_key)
+            
+            if cached_results:
+                # Yield cached results
+                for result_dict in cached_results:
+                    yield SearchResult(**result_dict)
+                continue
+            
+            # Search FAISS
+            faiss_results = []
+            if use_faiss:
+                faiss_index = get_faiss_index()
+                if faiss_index and faiss_index.index.ntotal > 0:
+                    try:
+                        query_embedding = self.embedding_service.encode_single(processed_text)
+                        faiss_results = self.faiss_service.search_similar(
+                            query_embedding=query_embedding,
+                            k=20,
+                            threshold=threshold
+                        )
+                    except Exception as e:
+                        logger.error(f"FAISS error: {e}")
+            
+            # Search external APIs
+            api_results = await self.api_manager.search_all_sources(
+                query=processed_text,
+                theme=theme,
+                sources=sources
+            )
+            
+            # Combine and deduplicate
+            all_papers = faiss_results + api_results
+            unique_papers = await deduplicator.deduplicate_papers(all_papers)
+            
+            # Calculate similarities
+            matches = await self._calculate_similarities(
+                original_text=text,
+                processed_text=processed_text,
+                papers=unique_papers,
+                threshold=threshold,
+                page=page,
+                paragraph=paragraph
+            )
+            
+            # Save to FAISS
+            if matches and use_faiss:
+                await self._save_to_faiss(unique_papers, processed_text)
+            
+            # Cache results
+            if matches:
+                await self.cache.save_to_cache(
+                    cache_key,
+                    [result.to_dict() for result in matches]
+                )
+            
+            # ✅ Yield results inmediatamente
+            for match in matches:
+                yield match

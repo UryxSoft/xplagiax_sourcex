@@ -2,9 +2,10 @@
 Search Routes - Similarity search and plagiarism check endpoints
 """
 from functools import wraps
-from flask import Blueprint
+from flask import Blueprint,g
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+import time
 
 from app.api.controllers.search_controller import search_controller
 
@@ -32,8 +33,34 @@ def rate_limit(limit_string):
         return decorated_function
     return decorator
 
+
+def async_rate_limit(limit_per_minute: int):
+    """Rate limiter asíncrono que no bloquea"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            # Usar Redis para rate limiting distribuido
+            key = f"ratelimit:{request.remote_addr}:{f.__name__}"
+            redis_client = get_redis_client()
+            
+            if redis_client:
+                current = redis_client.incr(key)
+                if current == 1:
+                    redis_client.expire(key, 60)
+                
+                if current > limit_per_minute:
+                    return jsonify({
+                        "error": "Rate limit exceeded",
+                        "retry_after": redis_client.ttl(key)
+                    }), 429
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
 @search_bp.route('/similarity-search', methods=['POST'])
-@rate_limit.limit("10 per minute")
+#@rate_limit.limit("10 per minute")
+@async_rate_limit(10) 
 def similarity_search():
     """
     POST /api/similarity-search

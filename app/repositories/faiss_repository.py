@@ -9,6 +9,7 @@ from typing import List, Dict, Optional, Tuple
 import faiss
 
 from app.models.enums import FAISSStrategy
+from app.utils.serialization import dumps_msgpack, loads_msgpack
 
 logger = logging.getLogger(__name__)
 
@@ -330,43 +331,43 @@ class FAISSRepository:
     
     def save(self) -> bool:
         """
-        Save index and metadata to disk
-        
-        Returns:
-            True if successful, False otherwise
+        Save index and metadata to disk usando msgpack (3-5x más rápido)
         """
         try:
-            # Create data directory if needed
+            # Create data directory
             os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
             
-            # Save FAISS index
+            # Save FAISS index (binario nativo)
             faiss.write_index(self.index, self.index_path)
             
-            # Save metadata
+            # ✅ Save metadata con msgpack (mucho más rápido que pickle)
+            metadata_dict = {
+                'metadata': {
+                    str(k): v for k, v in self.metadata.items()
+                },
+                'strategy': self.current_strategy.value,
+                'dimension': self.dimension,
+                'version': '2.1.0'
+            }
+            
+            # Usar msgpack
             with open(self.metadata_path, 'wb') as f:
-                pickle.dump({
-                    'metadata': self.metadata,
-                    'strategy': self.current_strategy.value,
-                    'dimension': self.dimension
-                }, f)
+                f.write(dumps_msgpack(metadata_dict))
             
             logger.info(
-                f"FAISS index saved: {self.index.ntotal} papers, "
+                f"✅ FAISS index saved: {self.index.ntotal} papers, "
                 f"{len(self.metadata)} metadata entries"
             )
             
             return True
-        
+    
         except Exception as e:
             logger.error(f"Error saving FAISS index: {e}", exc_info=True)
             return False
     
     def load(self) -> bool:
         """
-        Load index and metadata from disk
-        
-        Returns:
-            True if successful, False otherwise
+        Load index and metadata from disk usando msgpack
         """
         try:
             # Load FAISS index
@@ -376,14 +377,19 @@ class FAISSRepository:
             
             self.index = faiss.read_index(self.index_path)
             
-            # Load metadata
+            # ✅ Load metadata con msgpack
             if not os.path.exists(self.metadata_path):
                 logger.warning(f"Metadata file not found: {self.metadata_path}")
                 self.metadata = {}
             else:
                 with open(self.metadata_path, 'rb') as f:
-                    data = pickle.load(f)
-                    self.metadata = data.get('metadata', {})
+                    data = loads_msgpack(f.read())
+                    
+                    # Convertir keys de string a int
+                    self.metadata = {
+                        int(k): v for k, v in data.get('metadata', {}).items()
+                    }
+                    
                     self.current_strategy = FAISSStrategy(
                         data.get('strategy', FAISSStrategy.FLAT_IDMAP.value)
                     )

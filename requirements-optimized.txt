@@ -1,0 +1,30 @@
+# requirements-optimized.txt (NUEVO ARCHIVO)
+# Serialización ultra-rápida
+orjson==3.9.10
+msgpack==1.0.7
+
+# ASGI y servidores optimizados
+uvicorn[standard]==0.24.0
+gunicorn==21.2.0
+
+# Redis optimizado
+redis[hiredis]==5.0.1
+hiredis==2.2.3
+
+# Monitoring y profiling
+py-spy==0.3.14
+memory-profiler==0.61.0
+
+# PostgreSQL (opcional)
+psycopg2-binary==2.9.9
+
+# Compresión
+brotli==1.1.0
+
+# HTTP/2 client
+httpx[http2]==0.25.2
+
+# Async SQLite
+aiosqlite==0.19.0
+
+# Todo lo demás de requirements.txt original se mantiene
