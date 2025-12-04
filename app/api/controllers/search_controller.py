@@ -1,16 +1,33 @@
 """
 Search Controller - Handle similarity search and plagiarism check
+
+const eventSource = new EventSource('/api/similarity-search/stream?theme=ML&text=test');
+
+eventSource.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    
+    if (data.done) {
+        console.log(`Done: ${data.count} results`);
+        eventSource.close();
+    } else {
+        console.log(`Result ${data.index}:`, data.result);
+        // Mostrar resultado inmediatamente en UI
+    }
+};
+
 """
 import logging
 from dataclasses import asdict
-from flask import request, jsonify, g
+from flask import request, jsonify, g, stream_with_context, Response
 from marshmallow import ValidationError
+import json
 
 from app.api.schemas.search_schema import SimilaritySearchSchema, PlagiarismCheckSchema
 from app.core.errors import ValidationError as APIValidationError
 from app.services.similarity_service import SimilarityService
 from app.utils.asyncio_compat import run_async
 from app.utils.cache import CacheManager
+from app.utils.request_deduplicator import get_deduplicator
 import time
 
 logger = logging.getLogger(__name__)
@@ -59,6 +76,26 @@ class SearchController:
             except ValidationError as e:
                 raise APIValidationError(str(e.messages))
             
+            # Generar dedup key
+            dedup_key = f"search:{validated['theme']}:{validated['threshold']}:{hash(str(validated['texts']))}"
+            
+            # ✅ Deduplicate
+            deduplicator = get_deduplicator()
+            
+            results = run_async(
+                deduplicator.deduplicate(
+                    dedup_key,
+                    self.similarity_service.search_similarity,
+                    theme=validated['theme'],
+                    idiom=validated['idiom'],
+                    texts=validated['texts'],
+                    threshold=validated['threshold'],
+                    use_faiss=validated['use_faiss'],
+                    sources=validated['sources']
+                )
+            )
+
+
             # ✅ 2. Check cache ANTES de procesar
             cache_key = self.cache_manager.generate_key(
                 theme=validated['theme'],
@@ -240,6 +277,62 @@ class SearchController:
                 "error": "Plagiarism check failed",
                 "message": "An error occurred during analysis"
             }), 500
+
+    def similarity_search_stream(self):
+        """
+        Search con streaming (Server-Sent Events)
+        
+        GET /api/similarity-search/stream?theme=X&text=Y&threshold=0.7
+        """
+        def generate():
+            """Generator para SSE"""
+            try:
+                # Parse params
+                theme = request.args.get('theme', '')
+                text = request.args.get('text', '')
+                threshold = float(request.args.get('threshold', 0.7))
+                
+                if not theme or not text:
+                    yield f"data: {json.dumps({'error': 'Missing params'})}\n\n"
+                    return
+                
+                # Process streaming
+                texts = [("1", "1", text)]
+                
+                async def stream_results():
+                    async for result in self.similarity_service.search_similarity_streaming(
+                        theme=theme,
+                        idiom='en',
+                        texts=texts,
+                        threshold=threshold
+                    ):
+                        yield result
+                
+                # Stream results
+                count = 0
+                for result in run_async(stream_results()):
+                    count += 1
+                    data = {
+                        'index': count,
+                        'result': asdict(result)
+                    }
+                    yield f"data: {json.dumps(data)}\n\n"
+                
+                # Final message
+                yield f"data: {json.dumps({'done': True, 'count': count})}\n\n"
+            
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no'  # Nginx
+            }
+        )
 
 
 # Singleton instance

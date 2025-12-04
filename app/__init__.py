@@ -5,6 +5,9 @@ from flask import Flask
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from app.utils.gc_optimizer import optimize_gc, manual_gc_cycle
+import threading
+import time
 
 # Setup logging
 from app.utils.logging_config import setup_logging
@@ -98,6 +101,21 @@ def create_app(config_name=None):
         for warning in warnings:
             logger.warning(f"  {warning}")
     
+
+
+    # ✅ Optimizar GC
+    #optimize_gc()
+    
+    # ✅ Background GC thread
+    #def gc_worker():
+    #    """Worker para GC periódico"""
+    #    while True:
+    #        time.sleep(60)  # Cada minuto
+    #        manual_gc_cycle()
+    
+    #gc_thread = threading.Thread(target=gc_worker, daemon=True)
+    #gc_thread.start()
     logger.info("✅ Application initialized successfully")
     
+
     return app
